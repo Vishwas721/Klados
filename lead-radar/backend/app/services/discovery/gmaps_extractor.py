@@ -1,18 +1,31 @@
-"""Direct extraction from Google's undocumented `tbm=map` search endpoint."""
+"""Google Maps business discovery via a Camoufox-driven headless browser.
 
-import json
+The Maps search sidebar is a single-page app: results are lazy-loaded into
+a `div[role="feed"]` as the user scrolls, built from JS-side session tokens
+that a plain HTTP GET can't reproduce (confirmed by capturing the page's own
+XHR traffic - the `tbm=map` request it issues is signed with a short-lived
+session id minted by the page's JS). So instead of hitting that endpoint
+directly, we drive an actual (stealth) browser and read the rendered DOM.
+"""
+
+import asyncio
 import re
 from urllib.parse import quote, urlparse
 
-import httpx
+from camoufox.async_api import AsyncCamoufox
 
 from app.services.discovery.geo_grid import cell_to_coords, generate_city_cells
 
-SEARCH_URL = "https://www.google.com/search"
-XSSI_PREFIX = ")]}'"
+MAPS_SEARCH_URL = "https://www.google.com/maps/search/{query}/@{lat},{lng},15z"
+
+FEED_SELECTOR = 'div[role="feed"]'
+CARD_SELECTOR = 'div[role="article"]'
+NAME_LINK_SELECTOR = "a.hfpxzc"
+WEBSITE_LINK_SELECTOR = 'a[data-value="Website"]'
 
 PHONE_REGEX = re.compile(r"(?:\+91[\-\s]?)?[6-9]\d{9}")
-_PLACE_ID_REGEX = re.compile(r"^0x[0-9a-fA-F]+:0x[0-9a-fA-F]+$|^[a-zA-Z0-9_-]{20,}$")
+_RAW_PHONE_CANDIDATE = re.compile(r"(\+?\d[\d\s\-]{7,14}\d)")
+_COORDS_IN_HREF = re.compile(r"!3d(-?\d+\.\d+)!4d(-?\d+\.\d+)")
 
 _EXCLUDED_WEBSITE_HOSTS = (
     "google.com",
@@ -25,28 +38,9 @@ _EXCLUDED_WEBSITE_HOSTS = (
     "yellowpages.in",
 )
 
-_HEADERS = {
-    "User-Agent": (
-        "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 "
-        "(KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36"
-    ),
-    "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,image/webp,*/*;q=0.8",
-    "Accept-Language": "en-IN,en;q=0.9",
-}
 
-
-def _strip_xssi_prefix(text: str) -> str:
-    text = text.strip()
-    return text[len(XSSI_PREFIX):] if text.startswith(XSSI_PREFIX) else text
-
-
-def _build_request_url(query: str, lat: float, lng: float, limit: int) -> str:
-    pb = f"!1m2!1s{lat}!2s{lng}!7i{limit}"
-    return f"{SEARCH_URL}?tbm=map&q={quote(query)}&pb={pb}"
-
-
-def _is_valid_website(url: str) -> bool:
-    if not isinstance(url, str) or not url.startswith("http"):
+def _is_valid_website(url: str | None) -> bool:
+    if not url or not url.startswith("http"):
         return False
     host = urlparse(url).netloc.lower()
     if not host:
@@ -54,133 +48,132 @@ def _is_valid_website(url: str) -> bool:
     return not any(host == d or host.endswith("." + d) for d in _EXCLUDED_WEBSITE_HOSTS)
 
 
-def _flatten_strings(node, out: list) -> None:
-    if isinstance(node, str):
-        out.append(node)
-    elif isinstance(node, list):
-        for item in node:
-            _flatten_strings(item, out)
+def _normalize_phone(raw: str) -> str | None:
+    digits = re.sub(r"[^\d+]", "", raw)
+    if digits.startswith("+91"):
+        digits = digits[3:]
+    elif digits.startswith("91") and len(digits) == 12:
+        digits = digits[2:]
+    elif digits.startswith("0") and len(digits) == 11:
+        digits = digits[1:]
+    return digits if PHONE_REGEX.fullmatch(digits) else None
 
 
-def _extract_place_entries(payload) -> list:
-    """Locate the list of per-business result arrays inside the payload.
-
-    Google reshuffles this undocumented structure's array indices without
-    notice, so instead of hard-coding positions we scan the tree for the
-    largest list-of-lists group, which is reliably the results list.
-    """
-    candidates = []
-
-    def _walk(node):
-        if isinstance(node, list):
-            if node and all(isinstance(item, list) for item in node):
-                candidates.append(node)
-            for item in node:
-                _walk(item)
-
-    _walk(payload)
-    candidates.sort(key=len, reverse=True)
-    return candidates[0] if candidates else []
+def _extract_phone(card_text: str) -> str | None:
+    for raw in _RAW_PHONE_CANDIDATE.findall(card_text):
+        normalized = _normalize_phone(raw)
+        if normalized:
+            return normalized
+    return None
 
 
-def _extract_coords(entry, fallback: tuple) -> tuple:
-    numbers = []
-
-    def _walk(node):
-        if isinstance(node, (int, float)) and not isinstance(node, bool):
-            numbers.append(float(node))
-        elif isinstance(node, list):
-            for item in node:
-                _walk(item)
-
-    _walk(entry)
-
-    for i in range(len(numbers) - 1):
-        lat, lng = numbers[i], numbers[i + 1]
-        if 6.0 <= lat <= 37.0 and 68.0 <= lng <= 97.0:
-            return lat, lng
-    return fallback
+def _extract_coords(href: str | None, fallback: tuple) -> tuple:
+    match = _COORDS_IN_HREF.search(href or "")
+    if not match:
+        return fallback
+    return float(match.group(1)), float(match.group(2))
 
 
-def _extract_business_name(strings: list) -> str | None:
-    candidates = []
-    for s in strings:
-        candidate = s.strip()
-        if not candidate or candidate.startswith("http"):
-            continue
-        if PHONE_REGEX.fullmatch(candidate) or candidate.isdigit():
-            continue
-        if _PLACE_ID_REGEX.match(candidate):
-            continue
-        if 2 <= len(candidate) <= 120:
-            candidates.append(candidate)
+async def _scroll_feed(page, target_count: int, max_rounds: int = 12, pause_ms: int = 1200) -> None:
+    feed = page.locator(FEED_SELECTOR)
+    await feed.hover()
 
-    if not candidates:
-        return None
+    previous_count = -1
+    stalled_rounds = 0
+    for _ in range(max_rounds):
+        current_count = await page.locator(CARD_SELECTOR).count()
+        if current_count >= target_count:
+            return
+        if current_count == previous_count:
+            stalled_rounds += 1
+            if stalled_rounds >= 2:
+                return  # end of results reached
+        else:
+            stalled_rounds = 0
+        previous_count = current_count
 
-    # Real business names almost always contain a space; opaque tokens
-    # (feature IDs, category slugs) usually don't.
-    with_space = [c for c in candidates if " " in c]
-    return with_space[0] if with_space else candidates[0]
-
-
-def _parse_entry(entry, query_url: str, fallback_coords: tuple) -> dict | None:
-    strings: list = []
-    _flatten_strings(entry, strings)
-    if not strings:
-        return None
-
-    business_name = _extract_business_name(strings)
-    if not business_name:
-        return None
-
-    phone_match = PHONE_REGEX.search(" ".join(strings))
-    phone_number = phone_match.group(0) if phone_match else None
-
-    website_url = next((s for s in strings if _is_valid_website(s)), None)
-
-    latitude, longitude = _extract_coords(entry, fallback_coords)
-
-    return {
-        "business_name": business_name,
-        "phone_number": phone_number,
-        "website_url": website_url,
-        "origin_source_url": query_url,
-        "latitude": latitude,
-        "longitude": longitude,
-        "category": "DIGITAL_GHOST" if website_url is None else None,
-    }
+        await page.mouse.wheel(0, 1200)
+        await page.keyboard.press("PageDown")
+        await page.wait_for_timeout(pause_ms)
 
 
-def extract_places(query: str, lat: float, lng: float, limit: int = 20) -> list:
-    url = _build_request_url(query, lat, lng, limit)
-
-    with httpx.Client(headers=_HEADERS, timeout=15.0, follow_redirects=True) as client:
-        response = client.get(url)
-        response.raise_for_status()
-
-    cleaned = _strip_xssi_prefix(response.text)
-
-    try:
-        payload = json.loads(cleaned)
-    except json.JSONDecodeError:
-        return []
+async def _extract_from_feed(page, query_url: str, fallback_coords: tuple, limit: int) -> list:
+    cards = page.locator(CARD_SELECTOR)
+    count = await cards.count()
 
     results = []
     seen_names = set()
-    for entry in _extract_place_entries(payload):
-        place = _parse_entry(entry, url, (lat, lng))
-        if place is None or place["business_name"] in seen_names:
+    for i in range(count):
+        card = cards.nth(i)
+
+        name_link = card.locator(NAME_LINK_SELECTOR).first
+        if await name_link.count() == 0:
             continue
-        seen_names.add(place["business_name"])
-        results.append(place)
+
+        business_name = (await name_link.get_attribute("aria-label") or "").strip()
+        if not business_name or business_name in seen_names:
+            continue
+
+        place_href = await name_link.get_attribute("href")
+        latitude, longitude = _extract_coords(place_href, fallback_coords)
+
+        website_link = card.locator(WEBSITE_LINK_SELECTOR).first
+        website_url = None
+        if await website_link.count() > 0:
+            href = await website_link.get_attribute("href")
+            if _is_valid_website(href):
+                website_url = href
+
+        card_text = await card.inner_text()
+        phone_number = _extract_phone(card_text)
+
+        seen_names.add(business_name)
+        results.append(
+            {
+                "business_name": business_name,
+                "phone_number": phone_number,
+                "website_url": website_url,
+                "origin_source_url": query_url,
+                "latitude": latitude,
+                "longitude": longitude,
+                "category": "DIGITAL_GHOST" if website_url is None else None,
+            }
+        )
         if len(results) >= limit:
             break
 
     return results
 
 
+async def _extract_places_async(query: str, lat: float, lng: float, limit: int) -> list:
+    url = MAPS_SEARCH_URL.format(query=quote(query), lat=lat, lng=lng)
+
+    camoufox = AsyncCamoufox(headless=True, geoip=True, locale="en-IN")
+    browser = None
+    try:
+        browser = await camoufox.__aenter__()
+        page = await browser.new_page()
+        await page.goto(url, wait_until="networkidle", timeout=45000)
+
+        try:
+            await page.wait_for_selector(FEED_SELECTOR, timeout=15000)
+        except Exception:
+            return []
+
+        await _scroll_feed(page, target_count=limit)
+        return await _extract_from_feed(page, url, (lat, lng), limit)
+    finally:
+        await camoufox.__aexit__(None, None, None)
+
+
+def extract_places(query: str, lat: float, lng: float, limit: int = 20) -> list:
+    """Search Google Maps around (lat, lng) and return parsed business leads."""
+    return asyncio.run(_extract_places_async(query, lat, lng, limit))
+
+
 if __name__ == "__main__":
+    import json
+
     cell = generate_city_cells("Bengaluru")[0]
     cell_lat, cell_lng = cell_to_coords(cell)
 
