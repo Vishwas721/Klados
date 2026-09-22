@@ -79,6 +79,7 @@ export default function DashboardPage() {
         </div>
         <button
           type="button"
+          suppressHydrationWarning
           onClick={loadLeads}
           disabled={loading}
           className="inline-flex items-center gap-1.5 rounded-lg border border-gray-200 bg-white px-3 py-1.5 text-sm font-medium text-gray-600 hover:bg-gray-50 disabled:opacity-50"

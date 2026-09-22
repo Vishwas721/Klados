@@ -30,6 +30,7 @@ export function FilterTabs({ active, onChange, counts }: FilterTabsProps) {
           <button
             key={tab.key}
             type="button"
+            suppressHydrationWarning
             onClick={() => onChange(tab.key)}
             className={`rounded-full px-3.5 py-1.5 text-sm font-medium transition-colors ${
               isActive

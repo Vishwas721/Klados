@@ -43,6 +43,7 @@ export function LeadRowActions({ lead, onWhatsAppSent, onOptOut }: LeadRowAction
     <div className="flex items-center gap-2">
       <button
         type="button"
+        suppressHydrationWarning
         onClick={handleWhatsApp}
         disabled={!whatsappLink || pending !== null}
         title={whatsappLink ? undefined : "No phone number on file"}
@@ -53,6 +54,7 @@ export function LeadRowActions({ lead, onWhatsAppSent, onOptOut }: LeadRowAction
       </button>
       <button
         type="button"
+        suppressHydrationWarning
         onClick={handleOptOut}
         disabled={pending !== null}
         className="inline-flex items-center gap-1.5 rounded-lg border border-gray-200 px-3 py-1.5 text-xs font-medium text-gray-600 hover:bg-gray-50 disabled:cursor-not-allowed disabled:opacity-50"
