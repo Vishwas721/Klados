@@ -1,0 +1,22 @@
+FROM python:3.11-slim
+
+# Camoufox drives a patched, stealth-patched Firefox build. `playwright
+# install-deps` pulls the native libs that Firefox needs to run headless on
+# Debian, and xvfb backs Camoufox's `headless="virtual"` mode so the browser
+# has a display to render into without a real screen in the container.
+RUN apt-get update && apt-get install -y --no-install-recommends \
+    xvfb \
+    wget \
+    ca-certificates \
+    && rm -rf /var/lib/apt/lists/*
+
+WORKDIR /app
+
+COPY backend/requirements.txt .
+RUN pip install --no-cache-dir -r requirements.txt \
+    && playwright install-deps firefox \
+    && camoufox fetch
+
+COPY backend/ .
+
+CMD ["python", "-m", "app.worker"]

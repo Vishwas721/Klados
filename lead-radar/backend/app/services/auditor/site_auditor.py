@@ -19,6 +19,7 @@ if _backend_root not in sys.path:
 from camoufox.async_api import AsyncCamoufox
 from playwright.async_api import TimeoutError as PlaywrightTimeoutError
 
+from app.core.browser import camoufox_headless_mode
 from app.services.auditor.classifier import query_ollama
 
 NAV_TIMEOUT_MS = 15000
@@ -40,7 +41,9 @@ _PERFORMANCE_JS = """
 async def _audit_lead_async(website_url: str) -> dict:
     has_ssl = website_url.startswith("https://")
 
-    camoufox = AsyncCamoufox(headless=False, geoip=True, humanize=True, os=["windows"])
+    camoufox = AsyncCamoufox(
+        headless=camoufox_headless_mode(), geoip=True, humanize=True, os=["windows"]
+    )
     launched = False
     try:
         browser = await camoufox.__aenter__()
