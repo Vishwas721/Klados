@@ -9,8 +9,15 @@ directly, we drive an actual (stealth) browser and read the rendered DOM.
 """
 
 import asyncio
+from pathlib import Path
 import re
+import sys
 from urllib.parse import quote, urlparse
+
+# Ensure backend root is on sys.path when executed directly as a script
+_backend_root = str(Path(__file__).resolve().parents[3])
+if _backend_root not in sys.path:
+    sys.path.insert(0, _backend_root)
 
 from camoufox.async_api import AsyncCamoufox
 
@@ -149,9 +156,10 @@ async def _extract_places_async(query: str, lat: float, lng: float, limit: int) 
     url = MAPS_SEARCH_URL.format(query=quote(query), lat=lat, lng=lng)
 
     camoufox = AsyncCamoufox(headless=True, geoip=True, locale="en-IN")
-    browser = None
+    launched = False
     try:
         browser = await camoufox.__aenter__()
+        launched = True
         page = await browser.new_page()
         await page.goto(url, wait_until="networkidle", timeout=45000)
 
@@ -163,7 +171,8 @@ async def _extract_places_async(query: str, lat: float, lng: float, limit: int) 
         await _scroll_feed(page, target_count=limit)
         return await _extract_from_feed(page, url, (lat, lng), limit)
     finally:
-        await camoufox.__aexit__(None, None, None)
+        if launched:
+            await camoufox.__aexit__(None, None, None)
 
 
 def extract_places(query: str, lat: float, lng: float, limit: int = 20) -> list:
