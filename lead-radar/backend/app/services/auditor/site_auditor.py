@@ -40,7 +40,7 @@ _PERFORMANCE_JS = """
 async def _audit_lead_async(website_url: str) -> dict:
     has_ssl = website_url.startswith("https://")
 
-    camoufox = AsyncCamoufox(headless="virtual", geoip=True, humanize=True, os=["windows"])
+    camoufox = AsyncCamoufox(headless=False, geoip=True, humanize=True, os=["windows"])
     launched = False
     try:
         browser = await camoufox.__aenter__()
