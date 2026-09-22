@@ -21,6 +21,7 @@ if _backend_root not in sys.path:
 
 from camoufox.async_api import AsyncCamoufox
 
+from app.core.browser import camoufox_headless_mode
 from app.services.discovery.geo_grid import cell_to_coords, generate_city_cells
 
 MAPS_SEARCH_URL = "https://www.google.com/maps/search/{query}/@{lat},{lng},15z"
@@ -155,7 +156,7 @@ async def _extract_from_feed(page, query_url: str, fallback_coords: tuple, limit
 async def _extract_places_async(query: str, lat: float, lng: float, limit: int) -> list:
     url = MAPS_SEARCH_URL.format(query=quote(query), lat=lat, lng=lng)
 
-    camoufox = AsyncCamoufox(headless=True, geoip=True, locale="en-IN")
+    camoufox = AsyncCamoufox(headless=camoufox_headless_mode(), geoip=True, locale="en-IN")
     launched = False
     try:
         browser = await camoufox.__aenter__()
