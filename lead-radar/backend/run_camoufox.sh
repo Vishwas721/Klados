@@ -13,6 +13,23 @@ CAMOUFOX_X11_DIR="$RUNTIME_DIR/camoufox-x11"
 
 mkdir -p "$CAMOUFOX_X11_DIR"
 
+# Ensure backend directory is in PYTHONPATH so app modules resolve
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+export PYTHONPATH="${SCRIPT_DIR}:${PYTHONPATH:-}"
+
+# If no command arguments are provided, default to executing the worker
+if [ $# -eq 0 ]; then
+    if command -v python3 >/dev/null 2>&1; then
+        set -- python3 -m app.worker
+    else
+        set -- python -m app.worker
+    fi
+elif [ "$1" = "python" ] && ! command -v python >/dev/null 2>&1 && command -v python3 >/dev/null 2>&1; then
+    # Fallback to python3 if python is not in PATH
+    shift
+    set -- python3 "$@"
+fi
+
 # Execute arguments safely inside the isolated mount namespace
 exec unshare --user --map-root-user --mount bash -c '
     set -euo pipefail

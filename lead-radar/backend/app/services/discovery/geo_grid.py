@@ -2,16 +2,11 @@
 
 import h3
 
-# Rough bounding box over central Bengaluru, covering Koramangala, Indiranagar,
-# HSR Layout and MG Road. (lat, lng) pairs.
-_CITY_BOUNDING_BOXES: dict[str, list[tuple[float, float]]] = {
-    "bengaluru": [
-        (12.99, 77.59),  # NW, near MG Road / Indiranagar
-        (12.99, 77.66),  # NE, past Indiranagar
-        (12.90, 77.66),  # SE, past HSR Layout
-        (12.90, 77.59),  # SW, near Koramangala
-    ],
-}
+try:
+    from app.services.discovery.targets import CITY_BOUNDING_BOXES as _CITY_BOUNDING_BOXES
+except ImportError:
+    from targets import CITY_BOUNDING_BOXES as _CITY_BOUNDING_BOXES
+
 
 
 def generate_city_cells(city_name: str, resolution: int = 9) -> list[str]:

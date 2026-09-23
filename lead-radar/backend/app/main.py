@@ -94,7 +94,7 @@ def trigger_scrape(payload: ScrapeTriggerRequest):
 
     selected_cells = cells[: payload.max_cells]
     jobs = [
-        task_queue.enqueue(process_h3_cell, hex_id, payload.query)
+        task_queue.enqueue(process_h3_cell, hex_id, payload.query, payload.city)
         for hex_id in selected_cells
     ]
 

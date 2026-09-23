@@ -21,10 +21,51 @@ if _backend_root not in sys.path:
 
 from camoufox.async_api import AsyncCamoufox
 
+from sqlalchemy import and_, func, or_, select
+from sqlalchemy.orm import Session
+
 from app.core.browser import camoufox_headless_mode
+from app.db.models import Lead
 from app.services.discovery.geo_grid import cell_to_coords, generate_city_cells
 
 MAPS_SEARCH_URL = "https://www.google.com/maps/search/{query}/@{lat},{lng},15z"
+
+
+def is_duplicate_lead(
+    db: Session,
+    phone_number: str | None,
+    business_name: str,
+    city: str | None = None,
+) -> bool:
+    """Check PostgreSQL for an existing phone_number or matching (business_name, city).
+
+    Returns True if a lead already exists, meaning audit can be skipped.
+    """
+    if not business_name:
+        return False
+
+    conditions = []
+    if phone_number and phone_number.strip():
+        conditions.append(Lead.phone_number == phone_number.strip())
+
+    b_name = business_name.strip().lower()
+    if city and city.strip():
+        c_name = city.strip().lower()
+        conditions.append(
+            and_(
+                func.lower(Lead.business_name) == b_name,
+                func.lower(Lead.city) == c_name,
+            )
+        )
+    else:
+        conditions.append(func.lower(Lead.business_name) == b_name)
+
+    if not conditions:
+        return False
+
+    stmt = select(Lead.id).where(or_(*conditions)).limit(1)
+    return db.execute(stmt).scalar_one_or_none() is not None
+
 
 FEED_SELECTOR = 'div[role="feed"]'
 CARD_SELECTOR = 'div[role="article"]'
@@ -105,7 +146,9 @@ async def _scroll_feed(page, target_count: int, max_rounds: int = 12, pause_ms: 
         await page.wait_for_timeout(pause_ms)
 
 
-async def _extract_from_feed(page, query_url: str, fallback_coords: tuple, limit: int) -> list:
+async def _extract_from_feed(
+    page, query_url: str, fallback_coords: tuple, limit: int, city: str = "Bengaluru"
+) -> list:
     cards = page.locator(CARD_SELECTOR)
     count = await cards.count()
 
@@ -141,6 +184,7 @@ async def _extract_from_feed(page, query_url: str, fallback_coords: tuple, limit
                 "business_name": business_name,
                 "phone_number": phone_number,
                 "website_url": website_url,
+                "city": city,
                 "origin_source_url": query_url,
                 "latitude": latitude,
                 "longitude": longitude,
@@ -153,7 +197,9 @@ async def _extract_from_feed(page, query_url: str, fallback_coords: tuple, limit
     return results
 
 
-async def _extract_places_async(query: str, lat: float, lng: float, limit: int) -> list:
+async def _extract_places_async(
+    query: str, lat: float, lng: float, limit: int, city: str = "Bengaluru"
+) -> list:
     url = MAPS_SEARCH_URL.format(query=quote(query), lat=lat, lng=lng)
 
     camoufox = AsyncCamoufox(headless=camoufox_headless_mode(), geoip=True, locale="en-IN")
@@ -170,15 +216,18 @@ async def _extract_places_async(query: str, lat: float, lng: float, limit: int) 
             return []
 
         await _scroll_feed(page, target_count=limit)
-        return await _extract_from_feed(page, url, (lat, lng), limit)
+        return await _extract_from_feed(page, url, (lat, lng), limit, city=city)
     finally:
         if launched:
             await camoufox.__aexit__(None, None, None)
 
 
-def extract_places(query: str, lat: float, lng: float, limit: int = 20) -> list:
+def extract_places(
+    query: str, lat: float, lng: float, limit: int = 20, city: str = "Bengaluru"
+) -> list:
     """Search Google Maps around (lat, lng) and return parsed business leads."""
-    return asyncio.run(_extract_places_async(query, lat, lng, limit))
+    return asyncio.run(_extract_places_async(query, lat, lng, limit, city=city))
+
 
 
 if __name__ == "__main__":

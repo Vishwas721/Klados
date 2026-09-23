@@ -1,0 +1,5 @@
+INFO:__main__:Starting RQ worker on queue: lead_tasks
+INFO:rq.worker:Worker bb5d1261ca064ed7988953d357345aa5: started with PID 1395, version 2.12.0
+INFO:rq.worker:Worker bb5d1261ca064ed7988953d357345aa5: subscribing to channel rq:pubsub:bb5d1261ca064ed7988953d357345aa5
+INFO:rq.worker:*** Listening on lead_tasks...
+INFO:rq.worker:Worker bb5d1261ca064ed7988953d357345aa5: cleaning registries for queue: lead_tasks
