@@ -1,4 +1,4 @@
-import { Lead, OutreachStatus } from "./types";
+import { Lead, OutreachStatus, ScanTriggerResponse } from "./types";
 
 export const API_BASE_URL = "http://localhost:8000";
 
@@ -33,5 +33,22 @@ export async function optOutLead(id: string): Promise<Lead> {
     method: "POST",
   });
   if (!res.ok) throw new Error(`Failed to opt out lead (${res.status})`);
+  return res.json();
+}
+
+export async function triggerScan(
+  query: string,
+  city: string,
+  maxCells = 2
+): Promise<ScanTriggerResponse> {
+  const res = await fetch(`${API_BASE_URL}/api/scrape/trigger`, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ query, city, max_cells: maxCells }),
+  });
+  if (!res.ok) {
+    const detail = await res.text().catch(() => "");
+    throw new Error(detail || `Scan trigger failed (${res.status})`);
+  }
   return res.json();
 }

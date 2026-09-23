@@ -36,3 +36,8 @@ export interface Lead {
   opted_out: boolean;
   status: OutreachStatus;
 }
+
+export interface ScanTriggerResponse {
+  task_ids: string[];
+  cells_queued: number;
+}
