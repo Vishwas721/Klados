@@ -173,16 +173,20 @@ cleanup() {
 # foreground npm process exits naturally as well).
 trap cleanup SIGINT SIGTERM EXIT
 
-# ── 4a: RQ queue worker (background)
+# ── 4a: RQ queue worker (background, inside WSLg X11 mount namespace)
 echo ""
-echo "[4/5] Starting RQ queue worker..."
+echo "[4/5] Starting RQ queue worker via run_camoufox.sh..."
+# Ensure the namespace wrapper is executable
+chmod +x "$BACKEND_DIR/run_camoufox.sh"
 (
-    # Re-activate the venv inside the subshell
+    # Re-activate the venv inside the subshell so all Python packages resolve
     source "$VENV_DIR/bin/activate"
     cd "$BACKEND_DIR"
     export PYTHONPATH="$BACKEND_DIR:${PYTHONPATH:-}"
-    # rq worker is the standard way to consume lead_tasks queue
-    python -m app.worker
+    # run_camoufox.sh creates a private mount namespace and bind-mounts a
+    # writable directory over the read-only /tmp/.X11-unix that WSLg exposes,
+    # allowing Xvfb (used by Camoufox) to create its sockets without errors.
+    ./run_camoufox.sh python -m app.worker
 ) >"$LOG_DIR/worker.log" 2>&1 &
 WORKER_PID=$!
 PIDS+=("$WORKER_PID")
