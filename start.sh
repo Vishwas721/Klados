@@ -41,7 +41,13 @@ fi
 
 BACKEND_DIR="$PROJECT_DIR/backend"
 FRONTEND_DIR="$PROJECT_DIR/frontend"
-VENV_DIR="$BACKEND_DIR/.venv"
+if [ -f "$BACKEND_DIR/.venv-linux/bin/activate" ]; then
+    VENV_DIR="$BACKEND_DIR/.venv-linux"
+elif [ -f "$BACKEND_DIR/.venv/bin/activate" ]; then
+    VENV_DIR="$BACKEND_DIR/.venv"
+else
+    VENV_DIR="$BACKEND_DIR/.venv"
+fi
 LOG_DIR="$PROJECT_DIR/logs"
 
 mkdir -p "$LOG_DIR"

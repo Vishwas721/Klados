@@ -9,9 +9,12 @@ directly, we drive an actual (stealth) browser and read the rendered DOM.
 """
 
 import asyncio
+import logging
+import os
 from pathlib import Path
 import re
 import sys
+import time
 from urllib.parse import quote, urlparse
 
 # Ensure backend root is on sys.path when executed directly as a script
@@ -29,6 +32,14 @@ from app.db.models import Lead
 from app.services.discovery.geo_grid import cell_to_coords, generate_city_cells
 
 MAPS_SEARCH_URL = "https://www.google.com/maps/search/{query}/@{lat},{lng},15z"
+
+logger = logging.getLogger(__name__)
+
+# Screenshots + HTML of pages where the results feed never appeared, so a
+# silent empty scrape can be diagnosed after the fact.
+DEBUG_DUMP_DIR = Path(
+    os.environ.get("GMAPS_DEBUG_DIR", Path(__file__).resolve().parents[4] / "logs" / "gmaps_debug")
+)
 
 
 def is_duplicate_lead(
@@ -71,8 +82,13 @@ FEED_SELECTOR = 'div[role="feed"]'
 CARD_SELECTOR = 'div[role="article"]'
 NAME_LINK_SELECTOR = "a.hfpxzc"
 WEBSITE_LINK_SELECTOR = 'a[data-value="Website"]'
+# Search-result cards no longer carry phone numbers or a Website button, so
+# those come from each place's detail page instead.
+DETAIL_PHONE_SELECTOR = 'button[data-item-id^="phone:tel:"]'
+DETAIL_WEBSITE_SELECTOR = 'a[data-item-id="authority"]'
 
-PHONE_REGEX = re.compile(r"(?:\+91[\-\s]?)?[6-9]\d{9}")
+# Match Indian mobile numbers (starts with 6-9, 10 digits) or landline numbers (STD code + number, 10-11 digits)
+PHONE_REGEX = re.compile(r"^[6-9]\d{9}$|^0[1-9]\d{8,9}$|^[1-9]\d{9}$")
 _RAW_PHONE_CANDIDATE = re.compile(r"(\+?\d[\d\s\-]{7,14}\d)")
 _COORDS_IN_HREF = re.compile(r"!3d(-?\d+\.\d+)!4d(-?\d+\.\d+)")
 
@@ -97,15 +113,18 @@ def _is_valid_website(url: str | None) -> bool:
     return not any(host == d or host.endswith("." + d) for d in _EXCLUDED_WEBSITE_HOSTS)
 
 
+
 def _normalize_phone(raw: str) -> str | None:
     digits = re.sub(r"[^\d+]", "", raw)
     if digits.startswith("+91"):
         digits = digits[3:]
     elif digits.startswith("91") and len(digits) == 12:
         digits = digits[2:]
-    elif digits.startswith("0") and len(digits) == 11:
+    elif digits.startswith("0") and len(digits) == 11 and digits[1] in "6789":
+        # Mobile with leading 0
         digits = digits[1:]
     return digits if PHONE_REGEX.fullmatch(digits) else None
+
 
 
 def _extract_phone(card_text: str) -> str | None:
@@ -151,6 +170,7 @@ async def _extract_from_feed(
 ) -> list:
     cards = page.locator(CARD_SELECTOR)
     count = await cards.count()
+    logger.info("[gmaps] %d result cards rendered in feed", count)
 
     results = []
     seen_names = set()
@@ -159,10 +179,15 @@ async def _extract_from_feed(
 
         name_link = card.locator(NAME_LINK_SELECTOR).first
         if await name_link.count() == 0:
+            logger.info("[gmaps] card %d: skipped - no name link (%s)", i, NAME_LINK_SELECTOR)
             continue
 
         business_name = (await name_link.get_attribute("aria-label") or "").strip()
-        if not business_name or business_name in seen_names:
+        if not business_name:
+            logger.info("[gmaps] card %d: skipped - name link has empty aria-label", i)
+            continue
+        if business_name in seen_names:
+            logger.info("[gmaps] card %d: skipped - duplicate name '%s'", i, business_name)
             continue
 
         place_href = await name_link.get_attribute("href")
@@ -177,6 +202,15 @@ async def _extract_from_feed(
 
         card_text = await card.inner_text()
         phone_number = _extract_phone(card_text)
+        logger.info(
+            "[gmaps] card %d: '%s' phone=%s website=%s",
+            i,
+            business_name,
+            phone_number,
+            website_url,
+        )
+        if phone_number is None:
+            logger.debug("[gmaps] card %d text (no phone matched): %r", i, card_text)
 
         seen_names.add(business_name)
         results.append(
@@ -186,6 +220,7 @@ async def _extract_from_feed(
                 "website_url": website_url,
                 "city": city,
                 "origin_source_url": query_url,
+                "place_url": place_href,
                 "latitude": latitude,
                 "longitude": longitude,
                 "category": "DIGITAL_GHOST" if website_url is None else None,
@@ -194,7 +229,97 @@ async def _extract_from_feed(
         if len(results) >= limit:
             break
 
+    logger.info(
+        "[gmaps] parsed %d places (%d with phone, %d with website) from %d cards",
+        len(results),
+        sum(1 for r in results if r["phone_number"]),
+        sum(1 for r in results if r["website_url"]),
+        count,
+    )
     return results
+
+
+async def _enrich_from_place_page(page, place: dict) -> None:
+    """Fill in phone/website from the place's detail page when the card lacked them."""
+    place_url = place.get("place_url")
+    if not place_url or (place["phone_number"] and place["website_url"]):
+        return
+
+    try:
+        await page.goto(place_url, wait_until="domcontentloaded", timeout=30000)
+        await page.wait_for_selector(
+            f"{DETAIL_PHONE_SELECTOR}, {DETAIL_WEBSITE_SELECTOR}, h1", timeout=10000
+        )
+        # The info rows render slightly after the heading.
+        await page.wait_for_timeout(1000)
+    except Exception as exc:
+        logger.warning("[gmaps] detail page failed for '%s': %s", place["business_name"], exc)
+        return
+
+    if not place["phone_number"]:
+        phone_button = page.locator(DETAIL_PHONE_SELECTOR).first
+        if await phone_button.count() > 0:
+            raw = (await phone_button.get_attribute("data-item-id") or "").removeprefix("phone:tel:")
+            place["phone_number"] = _normalize_phone(raw)
+            if place["phone_number"] is None:
+                logger.info("[gmaps] '%s': phone %r failed normalization", place["business_name"], raw)
+
+    if not place["website_url"]:
+        website_link = page.locator(DETAIL_WEBSITE_SELECTOR).first
+        if await website_link.count() > 0:
+            href = await website_link.get_attribute("href")
+            if _is_valid_website(href):
+                place["website_url"] = href
+                place["category"] = None
+            else:
+                logger.info("[gmaps] '%s': website %r rejected", place["business_name"], href)
+
+    logger.info(
+        "[gmaps] detail '%s': phone=%s website=%s",
+        place["business_name"],
+        place["phone_number"],
+        place["website_url"],
+    )
+
+
+async def _diagnose_missing_feed(page) -> str:
+    """Explain why the results feed never rendered, and dump the page."""
+    current_url = page.url
+    try:
+        title = await page.title()
+        body_text = (await page.locator("body").inner_text(timeout=5000))[:2000]
+    except Exception as exc:
+        title, body_text = "?", f"<could not read body: {exc}>"
+
+    lowered = body_text.lower()
+    if "consent.google" in current_url or "before you continue" in lowered:
+        reason = "Google consent interstitial"
+    elif "/sorry/" in current_url or "unusual traffic" in lowered or "captcha" in lowered:
+        reason = "Google bot check / CAPTCHA"
+    elif "/maps/place/" in current_url:
+        reason = "Maps jumped straight to a single place page (no results list)"
+    else:
+        reason = "feed selector not found (selectors may be stale)"
+
+    dump_hint = ""
+    try:
+        DEBUG_DUMP_DIR.mkdir(parents=True, exist_ok=True)
+        stem = DEBUG_DUMP_DIR / f"no_feed_{int(time.time())}"
+        await page.screenshot(path=f"{stem}.png", full_page=True)
+        Path(f"{stem}.html").write_text(await page.content(), encoding="utf-8")
+        dump_hint = f" (dumped {stem}.png/.html)"
+    except Exception as exc:
+        dump_hint = f" (debug dump failed: {exc})"
+
+    logger.warning(
+        "[gmaps] no results feed: %s | url=%s | title=%r%s | body[:300]=%r",
+        reason,
+        current_url,
+        title,
+        dump_hint,
+        body_text[:300],
+    )
+    return reason
 
 
 async def _extract_places_async(
@@ -208,15 +333,30 @@ async def _extract_places_async(
         browser = await camoufox.__aenter__()
         launched = True
         page = await browser.new_page()
+        logger.info("[gmaps] loading %s", url)
         await page.goto(url, wait_until="networkidle", timeout=45000)
+        logger.info("[gmaps] landed on %s (title=%r)", page.url, await page.title())
 
         try:
             await page.wait_for_selector(FEED_SELECTOR, timeout=15000)
         except Exception:
+            await _diagnose_missing_feed(page)
             return []
 
         await _scroll_feed(page, target_count=limit)
-        return await _extract_from_feed(page, url, (lat, lng), limit, city=city)
+        places = await _extract_from_feed(page, url, (lat, lng), limit, city=city)
+
+        detail_page = await browser.new_page()
+        for place in places:
+            await _enrich_from_place_page(detail_page, place)
+        logger.info(
+            "[gmaps] after detail pages: %d/%d with phone, %d/%d with website",
+            sum(1 for p in places if p["phone_number"]),
+            len(places),
+            sum(1 for p in places if p["website_url"]),
+            len(places),
+        )
+        return places
     finally:
         if launched:
             await camoufox.__aexit__(None, None, None)
