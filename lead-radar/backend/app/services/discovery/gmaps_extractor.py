@@ -12,6 +12,7 @@ import asyncio
 import logging
 import os
 from pathlib import Path
+import random
 import re
 import sys
 import time
@@ -42,16 +43,35 @@ DEBUG_DUMP_DIR = Path(
 )
 
 
+def _extract_place_id(href: str | None) -> str | None:
+    """Extract canonical Google Place ID (ChIJ...) or CID (0x...:0x...) from Maps URL."""
+    if not href:
+        return None
+    m = re.search(r"(ChIJ[a-zA-Z0-9_\-]+)", href)
+    if m:
+        return m.group(1)
+    m = re.search(r"!1s(0x[0-9a-fA-F]+:0x[0-9a-fA-F]+)", href)
+    if m:
+        return m.group(1)
+    return None
+
+
 def is_duplicate_lead(
     db: Session,
     phone_number: str | None,
     business_name: str,
     city: str | None = None,
+    place_id: str | None = None,
 ) -> bool:
-    """Check PostgreSQL for an existing phone_number or matching (business_name, city).
+    """Check PostgreSQL for an existing place_id, phone_number or matching (business_name, city).
 
     Returns True if a lead already exists, meaning audit can be skipped.
     """
+    if place_id and place_id.strip():
+        stmt_pid = select(Lead.id).where(Lead.place_id == place_id.strip()).limit(1)
+        if db.execute(stmt_pid).scalar_one_or_none() is not None:
+            return True
+
     if not business_name:
         return False
 
@@ -191,6 +211,7 @@ async def _extract_from_feed(
             continue
 
         place_href = await name_link.get_attribute("href")
+        place_id = _extract_place_id(place_href)
         latitude, longitude = _extract_coords(place_href, fallback_coords)
 
         website_link = card.locator(WEBSITE_LINK_SELECTOR).first
@@ -203,9 +224,10 @@ async def _extract_from_feed(
         card_text = await card.inner_text()
         phone_number = _extract_phone(card_text)
         logger.info(
-            "[gmaps] card %d: '%s' phone=%s website=%s",
+            "[gmaps] card %d: '%s' (place_id=%s) phone=%s website=%s",
             i,
             business_name,
+            place_id,
             phone_number,
             website_url,
         )
@@ -215,6 +237,7 @@ async def _extract_from_feed(
         seen_names.add(business_name)
         results.append(
             {
+                "place_id": place_id,
                 "business_name": business_name,
                 "phone_number": phone_number,
                 "website_url": website_url,
@@ -245,8 +268,21 @@ async def _enrich_from_place_page(page, place: dict) -> None:
     if not place_url or (place["phone_number"] and place["website_url"]):
         return
 
+    # Mimic human pacing: random 3-7s delay between page navigations
+    pacing_delay = random.uniform(3.0, 7.0)
+    logger.info(
+        "[gmaps] Mimicking human pacing: sleeping %.2fs before navigating to '%s' detail...",
+        pacing_delay,
+        place["business_name"],
+    )
+    await asyncio.sleep(pacing_delay)
+
     try:
         await page.goto(place_url, wait_until="domcontentloaded", timeout=30000)
+        # Attempt to capture place_id from redirected detail URL if missing
+        if not place.get("place_id"):
+            place["place_id"] = _extract_place_id(page.url)
+
         await page.wait_for_selector(
             f"{DETAIL_PHONE_SELECTOR}, {DETAIL_WEBSITE_SELECTOR}, h1", timeout=10000
         )

@@ -1,16 +1,17 @@
-import uuid
+from datetime import datetime, timedelta, timezone
 from typing import Literal
+import uuid
 
 from fastapi import Depends, FastAPI, HTTPException, Query
 from fastapi.middleware.cors import CORSMiddleware
-from pydantic import BaseModel
+from pydantic import BaseModel, Field
 from redis import Redis
 from rq import Queue
-from sqlalchemy import select
+from sqlalchemy import func, select
 from sqlalchemy.orm import Session
 
 from app.core.config import settings
-from app.db.models import Lead
+from app.db.models import Lead, SearchHistory
 from app.db.session import get_db
 from app.services.discovery.geo_grid import generate_city_cells
 from app.worker import QUEUE_NAME, process_h3_cell
@@ -42,12 +43,25 @@ OutreachStatus = Literal[
 class ScrapeTriggerRequest(BaseModel):
     query: str
     city: str
-    max_cells: int = 2
+    max_cells: int = Field(default=6, le=6, ge=1)
 
 
 class ScrapeTriggerResponse(BaseModel):
     task_ids: list[str]
     cells_queued: int
+
+
+class SearchHistoryOut(BaseModel):
+    model_config = {"from_attributes": True}
+
+    id: uuid.UUID
+    niche: str
+    city: str
+    last_run_at: datetime
+    leads_count: int
+    status: str
+    is_locked: bool
+    locked_until: datetime
 
 
 class LeadStatusUpdate(BaseModel):
@@ -58,6 +72,7 @@ class LeadOut(BaseModel):
     model_config = {"from_attributes": True}
 
     id: uuid.UUID
+    place_id: str | None = None
     business_name: str
     phone_number: str
     email: str | None
@@ -86,15 +101,65 @@ def health():
 
 
 @app.post("/api/scrape/trigger", response_model=ScrapeTriggerResponse)
-def trigger_scrape(payload: ScrapeTriggerRequest):
+def trigger_scrape(payload: ScrapeTriggerRequest, db: Session = Depends(get_db)):
+    norm_niche = payload.query.strip().lower()
+    norm_city = payload.city.strip().lower()
+
+    # 1. Daily Execution Lock Check (24-hour lock per niche + city)
+    history = db.execute(
+        select(SearchHistory).where(
+            func.lower(SearchHistory.niche) == norm_niche,
+            func.lower(SearchHistory.city) == norm_city,
+        )
+    ).scalar_one_or_none()
+
+    if history and history.is_locked:
+        unlock_time = history.locked_until
+        now = datetime.now(timezone.utc)
+        remaining_s = max(0, int((unlock_time - now).total_seconds()))
+        rem_h = remaining_s // 3600
+        rem_m = (remaining_s % 3600) // 60
+        unlock_str = unlock_time.strftime("%b %d, %I:%M %p UTC")
+        raise HTTPException(
+            status_code=429,
+            detail=(
+                f"Daily limit reached for '{payload.query}' in '{payload.city}'. "
+                f"Locked until {unlock_str} ({rem_h}h {rem_m}m remaining). Check back tomorrow."
+            ),
+            headers={"Retry-After": str(remaining_s)},
+        )
+
+    # 2. Generate H3 cells (strictly capped at max 6 cells)
     try:
         cells = generate_city_cells(payload.city)
     except ValueError as exc:
         raise HTTPException(status_code=400, detail=str(exc)) from exc
 
-    selected_cells = cells[: payload.max_cells]
+    max_cells = min(max(1, payload.max_cells), 6)
+    selected_cells = cells[:max_cells]
+
+    # Pre-seed seen_cells in Redis to prevent spatial expansion from re-running initial cells
+    seen_cells_key = f"seen_cells:{norm_city}:{norm_niche}"
+    for hex_id in selected_cells:
+        redis_conn.sadd(seen_cells_key, hex_id)
+
+    # 3. Update or create SearchHistory lock
+    if history is None:
+        history = SearchHistory(
+            niche=payload.query.strip(),
+            city=payload.city.strip(),
+            status="RUNNING",
+            last_run_at=datetime.now(timezone.utc),
+        )
+        db.add(history)
+    else:
+        history.status = "RUNNING"
+        history.last_run_at = datetime.now(timezone.utc)
+    db.commit()
+
+    # 4. Enqueue initial H3 cells to RQ
     jobs = [
-        task_queue.enqueue(process_h3_cell, hex_id, payload.query, payload.city)
+        task_queue.enqueue(process_h3_cell, hex_id, payload.query, payload.city, 0)
         for hex_id in selected_cells
     ]
 
@@ -102,6 +167,28 @@ def trigger_scrape(payload: ScrapeTriggerRequest):
         task_ids=[job.id for job in jobs],
         cells_queued=len(jobs),
     )
+
+
+@app.get("/api/search-history", response_model=list[SearchHistoryOut])
+def get_search_history(
+    limit: int = Query(default=30, le=100, gt=0),
+    db: Session = Depends(get_db),
+):
+    stmt = select(SearchHistory).order_by(SearchHistory.last_run_at.desc()).limit(limit)
+    records = db.execute(stmt).scalars().all()
+    return [
+        SearchHistoryOut(
+            id=r.id,
+            niche=r.niche,
+            city=r.city,
+            last_run_at=r.last_run_at,
+            leads_count=r.leads_count,
+            status=r.status,
+            is_locked=r.is_locked,
+            locked_until=r.locked_until,
+        )
+        for r in records
+    ]
 
 
 @app.get("/api/leads", response_model=list[LeadOut])

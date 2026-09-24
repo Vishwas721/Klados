@@ -15,6 +15,7 @@ export type OutreachStatus =
 
 export interface Lead {
   id: string;
+  place_id?: string | null;
   business_name: string;
   phone_number: string;
   email: string | null;
@@ -40,4 +41,15 @@ export interface Lead {
 export interface ScanTriggerResponse {
   task_ids: string[];
   cells_queued: number;
+}
+
+export interface SearchHistoryItem {
+  id: string;
+  niche: string;
+  city: string;
+  last_run_at: string;
+  leads_count: number;
+  status: string;
+  is_locked: boolean;
+  locked_until: string;
 }

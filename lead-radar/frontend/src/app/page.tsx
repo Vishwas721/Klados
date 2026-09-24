@@ -2,16 +2,16 @@
 
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { RefreshCw } from "lucide-react";
-import { Lead } from "@/lib/types";
-import { fetchLeads, optOutLead, updateLeadStatus } from "@/lib/api";
+import { Lead, SearchHistoryItem, ScanTriggerResponse } from "@/lib/types";
+import { fetchLeads, fetchSearchHistory, optOutLead, updateLeadStatus } from "@/lib/api";
 import { useToast } from "@/lib/useToast";
 import { MetricCards } from "@/components/MetricCards";
+import { CoverageHistory } from "@/components/CoverageHistory";
 import { FilterTabs, FilterTab } from "@/components/FilterTabs";
 import { SearchInput } from "@/components/SearchInput";
 import { LeadsTable } from "@/components/LeadsTable";
 import { ScanTrigger } from "@/components/ScanTrigger";
 import { ToastContainer } from "@/components/ToastContainer";
-import { ScanTriggerResponse } from "@/lib/types";
 
 // How long to keep auto-polling after a scan is queued (ms)
 const POLL_DURATION_MS = 5 * 60 * 1000; // 5 minutes
@@ -19,10 +19,16 @@ const POLL_INTERVAL_MS = 15_000;         // every 15 s
 
 export default function DashboardPage() {
   const [leads, setLeads] = useState<Lead[]>([]);
+  const [searchHistory, setSearchHistory] = useState<SearchHistoryItem[]>([]);
   const [loading, setLoading] = useState(true);
+  const [historyLoading, setHistoryLoading] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const [activeTab, setActiveTab] = useState<FilterTab>("ALL");
   const [search, setSearch] = useState("");
+
+  // Controlled prefill for ScanTrigger
+  const [prefillNiche, setPrefillNiche] = useState("");
+  const [prefillCity, setPrefillCity] = useState("");
 
   // Polling machinery
   const pollTimerRef = useRef<ReturnType<typeof setInterval> | null>(null);
@@ -44,13 +50,25 @@ export default function DashboardPage() {
     }
   }, []);
 
+  const loadHistory = useCallback(async () => {
+    setHistoryLoading(true);
+    try {
+      const hist = await fetchSearchHistory(30);
+      setSearchHistory(hist);
+    } catch {
+      // Graceful fallback if backend is momentarily unreachable
+    } finally {
+      setHistoryLoading(false);
+    }
+  }, []);
+
   useEffect(() => {
     loadLeads();
-  }, [loadLeads]);
+    loadHistory();
+  }, [loadLeads, loadHistory]);
 
   // ── Auto-refresh polling ─────────────────────────────────────────────────
   const startPolling = useCallback(() => {
-    // Cancel any existing timer
     if (pollTimerRef.current) clearInterval(pollTimerRef.current);
 
     pollDeadlineRef.current = Date.now() + POLL_DURATION_MS;
@@ -63,8 +81,9 @@ export default function DashboardPage() {
         return;
       }
       loadLeads(/* silent */ true);
+      loadHistory();
     }, POLL_INTERVAL_MS);
-  }, [loadLeads, toast]);
+  }, [loadLeads, loadHistory, toast]);
 
   // Clean up on unmount
   useEffect(() => {
@@ -75,20 +94,29 @@ export default function DashboardPage() {
 
   // ── Scan trigger callbacks ───────────────────────────────────────────────
   const handleScanQueued = useCallback(
-    (result: ScanTriggerResponse) => {
+    (result: ScanTriggerResponse, query: string, city: string) => {
       toast(
-        `✅ Radar queued — ${result.cells_queued} cell${result.cells_queued !== 1 ? "s" : ""} added to the worker. Auto-refreshing every ${POLL_INTERVAL_MS / 1000} s…`,
+        `✅ Radar launched for "${query}" in "${city}" (${result.cells_queued} cell${result.cells_queued !== 1 ? "s" : ""} queued). Auto-refreshing…`,
         "success",
         6000
       );
+      loadHistory();
       startPolling();
     },
-    [toast, startPolling]
+    [toast, startPolling, loadHistory]
   );
 
   const handleScanError = useCallback(
-    (message: string) => {
-      toast(`❌ Scan failed: ${message}`, "error", 6000);
+    (message: string, isRateLimit?: boolean, niche?: string, city?: string) => {
+      if (isRateLimit) {
+        toast(
+          `Daily limit reached for ${niche || "this niche"} in ${city || "this city"}. Check back tomorrow.`,
+          "error",
+          7000
+        );
+      } else {
+        toast(`❌ Scan failed: ${message}`, "error", 6000);
+      }
     },
     [toast]
   );
@@ -134,22 +162,25 @@ export default function DashboardPage() {
     });
   }, [leads, activeTab, search]);
 
-  // ── Render ───────────────────────────────────────────────────────────────
   return (
     <main className="mx-auto max-w-7xl px-4 py-8 sm:px-6 lg:px-8">
-
       {/* Header row */}
       <div className="flex items-center justify-between">
         <div>
           <h1 className="text-2xl font-semibold text-gray-900">Lead Radar</h1>
-          <p className="mt-1 text-sm text-gray-500">Daily outreach dashboard for audited leads</p>
+          <p className="mt-1 text-sm text-gray-500">
+            Autonomous SMB discovery, audit, &amp; outreach dashboard
+          </p>
         </div>
         <button
           type="button"
           suppressHydrationWarning
-          onClick={() => loadLeads()}
+          onClick={() => {
+            loadLeads();
+            loadHistory();
+          }}
           disabled={loading}
-          className="inline-flex items-center gap-1.5 rounded-lg border border-gray-200 bg-white px-3 py-1.5 text-sm font-medium text-gray-600 hover:bg-gray-50 disabled:opacity-50"
+          className="inline-flex items-center gap-1.5 rounded-lg border border-gray-200 bg-white px-3 py-1.5 text-sm font-medium text-gray-600 hover:bg-gray-50 disabled:opacity-50 shadow-xs"
         >
           <RefreshCw className={`h-3.5 w-3.5 ${loading ? "animate-spin" : ""}`} />
           Refresh
@@ -157,16 +188,33 @@ export default function DashboardPage() {
       </div>
 
       {/* ── Scan Trigger form ─────────────────────────────────────────────── */}
-      <div className="mt-4">
-        <ScanTrigger onScanQueued={handleScanQueued} onError={handleScanError} />
+      <div className="mt-5">
+        <ScanTrigger
+          onScanQueued={handleScanQueued}
+          onError={handleScanError}
+          prefillQuery={prefillNiche}
+          prefillCity={prefillCity}
+        />
       </div>
 
-      {/* Metric cards */}
+      {/* ── Metric cards ─────────────────────────────────────────────────── */}
       <div className="mt-6">
         <MetricCards leads={leads.filter((l) => !l.opted_out)} />
       </div>
 
-      {/* Filter tabs + local search */}
+      {/* ── Coverage / Daily Lock History ─────────────────────────────────── */}
+      <div className="mt-6">
+        <CoverageHistory
+          items={searchHistory}
+          loading={historyLoading}
+          onSelectNicheCity={(niche, city) => {
+            setPrefillNiche(niche);
+            setPrefillCity(city);
+          }}
+        />
+      </div>
+
+      {/* ── Filter tabs + local search ────────────────────────────────────── */}
       <div className="mt-6 flex flex-col gap-4 sm:flex-row sm:items-center sm:justify-between">
         <FilterTabs active={activeTab} onChange={setActiveTab} counts={counts} />
         <SearchInput value={search} onChange={setSearch} />
