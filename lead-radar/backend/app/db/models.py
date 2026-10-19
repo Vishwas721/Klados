@@ -133,3 +133,21 @@ class SearchHistory(Base):
         if last_run.tzinfo is None:
             last_run = last_run.replace(tzinfo=timezone.utc)
         return last_run + timedelta(hours=24)
+
+
+class CampaignTracker(Base):
+    __tablename__ = "campaign_tracker"
+
+    id: Mapped[uuid.UUID] = mapped_column(
+        UUID(as_uuid=True), primary_key=True, default=uuid.uuid4
+    )
+    city: Mapped[str] = mapped_column(String(100), nullable=False)
+    niche: Mapped[str] = mapped_column(String(255), nullable=False)
+    is_exhausted: Mapped[bool] = mapped_column(Boolean, default=False)
+    last_scraped_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), server_default=func.now()
+    )
+
+    __table_args__ = (
+        UniqueConstraint("niche", "city", name="uq_campaign_tracker_niche_city"),
+    )

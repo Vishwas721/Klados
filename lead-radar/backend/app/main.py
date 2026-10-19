@@ -159,7 +159,9 @@ def trigger_scrape(payload: ScrapeTriggerRequest, db: Session = Depends(get_db))
 
     # 4. Enqueue initial H3 cells to RQ
     jobs = [
-        task_queue.enqueue(process_h3_cell, hex_id, payload.query, payload.city, 0)
+        task_queue.enqueue(
+            process_h3_cell, args=(hex_id, payload.query, payload.city, 0), job_timeout=3600
+        )
         for hex_id in selected_cells
     ]
 
@@ -189,6 +191,14 @@ def get_search_history(
         )
         for r in records
     ]
+
+
+@app.get("/api/campaigns/exhausted")
+def get_exhausted_campaigns(db: Session = Depends(get_db)):
+    from app.db.models import CampaignTracker
+    stmt = select(CampaignTracker).where(CampaignTracker.is_exhausted == True)
+    records = db.execute(stmt).scalars().all()
+    return [{"city": r.city, "niche": r.niche, "last_scraped_at": r.last_scraped_at} for r in records]
 
 
 @app.get("/api/leads", response_model=list[LeadOut])

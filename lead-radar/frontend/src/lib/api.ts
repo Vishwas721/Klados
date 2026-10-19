@@ -79,3 +79,11 @@ export async function fetchSearchHistory(limit = 20): Promise<SearchHistoryItem[
   if (!res.ok) throw new ApiError(`Failed to fetch search history (${res.status})`, res.status);
   return res.json();
 }
+
+export async function fetchExhaustedCampaigns(): Promise<{city: string, niche: string, last_scraped_at: string}[]> {
+  const res = await fetch(`${API_BASE_URL}/api/campaigns/exhausted`, {
+    cache: "no-store",
+  });
+  if (!res.ok) throw new ApiError(`Failed to fetch exhausted campaigns (${res.status})`, res.status);
+  return res.json();
+}

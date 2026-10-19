@@ -77,7 +77,20 @@ def is_duplicate_lead(
 
     conditions = []
     if phone_number and phone_number.strip():
-        conditions.append(Lead.phone_number == phone_number.strip())
+        norm_phone = phone_number.strip()
+        norm_phone = __import__('re').sub(r'[\s\-]', '', norm_phone)
+        if norm_phone.startswith('+91'):
+            norm_phone = norm_phone[3:]
+        elif norm_phone.startswith('91') and len(norm_phone) == 12:
+            norm_phone = norm_phone[2:]
+        elif norm_phone.startswith('0') and len(norm_phone) == 11:
+            norm_phone = norm_phone[1:]
+            
+        db_phone = func.replace(Lead.phone_number, ' ', '')
+        db_phone = func.replace(db_phone, '-', '')
+        db_phone = func.replace(db_phone, '+91', '')
+        
+        conditions.append(db_phone.like(f"%{norm_phone}"))
 
     b_name = business_name.strip().lower()
     if city and city.strip():
@@ -363,11 +376,24 @@ async def _extract_places_async(
 ) -> list:
     url = MAPS_SEARCH_URL.format(query=quote(query), lat=lat, lng=lng)
 
-    camoufox = AsyncCamoufox(headless=camoufox_headless_mode(), geoip=True, locale="en-IN")
+    camoufox = None
+    browser = None
     launched = False
+
+    for attempt in range(3):
+        try:
+            camoufox = AsyncCamoufox(headless=camoufox_headless_mode(), geoip=True, locale="en-IN")
+            browser = await camoufox.__aenter__()
+            launched = True
+            break
+        except Exception as exc:
+            logger.warning("[gmaps] Camoufox launch failed (attempt %d/3): %s", attempt + 1, exc)
+            if attempt == 2:
+                logger.error("[gmaps] Camoufox launch permanently failed after 3 attempts.")
+                return []
+            await asyncio.sleep(5)
+
     try:
-        browser = await camoufox.__aenter__()
-        launched = True
         page = await browser.new_page()
         logger.info("[gmaps] loading %s", url)
         await page.goto(url, wait_until="networkidle", timeout=45000)
