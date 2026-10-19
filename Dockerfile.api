@@ -9,6 +9,6 @@ COPY backend/ .
 
 EXPOSE 8000
 
-# init_db.py creates tables directly (no migration step required) so a
-# fresh `docker compose up` has a working schema without a manual step.
-CMD ["sh", "-c", "python init_db.py && uvicorn app.main:app --host 0.0.0.0 --port 8000"]
+# Apply Alembic migrations on boot so the container schema matches the
+# migration history used in local dev (create_all would skip it).
+CMD ["sh", "-c", "alembic upgrade head && uvicorn app.main:app --host 0.0.0.0 --port 8000"]
