@@ -1,5 +1,5 @@
 # Runtime logs
-lead-radar/logs/
+logs/
 
 # Python
 __pycache__/

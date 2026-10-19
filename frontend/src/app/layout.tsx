@@ -13,7 +13,7 @@ const geistMono = Geist_Mono({
 });
 
 export const metadata: Metadata = {
-  title: "Lead Radar",
+  title: "Klados",
   description: "Daily outreach dashboard for audited leads",
 };
 

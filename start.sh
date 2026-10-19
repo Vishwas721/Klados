@@ -27,18 +27,7 @@ fi
 # ─────────────────────────────────────────────────────────────────────────────
 set -euo pipefail
 
-SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
-
-# ── Resolve project root (repo layout: klados/lead-radar/... OR klados/...)
-if [ -d "$SCRIPT_DIR/lead-radar/backend" ]; then
-    PROJECT_DIR="$SCRIPT_DIR/lead-radar"
-elif [ -d "$SCRIPT_DIR/backend" ]; then
-    PROJECT_DIR="$SCRIPT_DIR"
-else
-    echo "ERROR: Cannot locate a directory containing backend/ under $SCRIPT_DIR"
-    exit 1
-fi
-
+PROJECT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 BACKEND_DIR="$PROJECT_DIR/backend"
 FRONTEND_DIR="$PROJECT_DIR/frontend"
 if [ -f "$BACKEND_DIR/.venv-linux/bin/activate" ]; then
@@ -53,7 +42,7 @@ LOG_DIR="$PROJECT_DIR/logs"
 mkdir -p "$LOG_DIR"
 
 echo "========================================="
-echo "   Lead Radar 1-Click Startup"
+echo "   Klados 1-Click Startup"
 echo "   Project: $PROJECT_DIR"
 echo "========================================="
 
@@ -74,12 +63,12 @@ echo "      Docker is running."
 # ─────────────────────────────────────────────────────────────────────────────
 echo ""
 echo "[2/5] Starting PostgreSQL and Redis..."
-(cd "$BACKEND_DIR" && docker compose up -d)
+(cd "$PROJECT_DIR" && docker compose up -d postgres redis)
 
 echo "      Waiting for PostgreSQL to be healthy (up to 30 s)..."
 MAX_WAIT=30
 WAITED=0
-until docker exec lead_radar_postgres pg_isready -U postgres -d leads_db >/dev/null 2>&1; do
+until docker exec klados_postgres pg_isready -U postgres -d leads_db >/dev/null 2>&1; do
     if [ "$WAITED" -ge "$MAX_WAIT" ]; then
         echo "ERROR: PostgreSQL did not become ready within ${MAX_WAIT} s."
         exit 1
@@ -167,7 +156,7 @@ cleanup() {
     wait 2>/dev/null || true
 
     echo " Stopping Docker containers..."
-    (cd "$BACKEND_DIR" && docker compose stop) 2>/dev/null || true
+    (cd "$PROJECT_DIR" && docker compose stop postgres redis) 2>/dev/null || true
 
     echo " All services stopped. Goodbye."
     # Deactivate venv if still active

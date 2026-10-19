@@ -2,17 +2,16 @@
 setlocal enabledelayedexpansion
 
 echo =========================================
-echo    Lead Radar 1-Click Startup (Windows)
+echo    Klados 1-Click Startup (Windows)
 echo =========================================
 
-set "ROOT_DIR=%~dp0"
-if exist "%ROOT_DIR%lead-radar\backend" (
-    set "PROJECT_DIR=%ROOT_DIR%lead-radar"
-) else (
-    set "PROJECT_DIR=%ROOT_DIR%"
-)
+set "PROJECT_DIR=%~dp0"
+if "%PROJECT_DIR:~-1%"=="\" set "PROJECT_DIR=%PROJECT_DIR:~0,-1%"
+set "BACKEND_DIR=%PROJECT_DIR%\backend"
 
-cd /d "%PROJECT_DIR%"
+:: Prefer the backend's Windows venv when present; plain `python` otherwise.
+set "PYTHON=python"
+if exist "%BACKEND_DIR%\.venv-windows\Scripts\python.exe" set "PYTHON=%BACKEND_DIR%\.venv-windows\Scripts\python.exe"
 
 :: 1. Verify Docker is running
 echo [1/5] Verifying Docker daemon...
@@ -24,12 +23,12 @@ if %errorlevel% neq 0 (
 )
 echo Docker is running.
 
-:: 2. Start PostgreSQL and Redis via docker compose in backend\
+:: 2. Start PostgreSQL and Redis
 echo [2/5] Starting PostgreSQL and Redis containers...
-cd /d "%PROJECT_DIR%\backend"
-docker compose up -d
+cd /d "%PROJECT_DIR%"
+docker compose up -d postgres redis
 if %errorlevel% neq 0 (
-    echo ERROR: Failed to start Docker services in backend\
+    echo ERROR: Failed to start Docker services.
     exit /b 1
 )
 
@@ -37,7 +36,7 @@ if %errorlevel% neq 0 (
 echo Waiting for PostgreSQL to be ready on port 5433...
 set RETRY=0
 :WAIT_POSTGRES
-docker exec lead_radar_postgres pg_isready -U postgres -d leads_db >nul 2>&1
+docker exec klados_postgres pg_isready -U postgres -d leads_db >nul 2>&1
 if %errorlevel% neq 0 (
     set /a RETRY+=1
     if !RETRY! geq 30 (
@@ -51,13 +50,8 @@ echo PostgreSQL is ready.
 
 :: 3. Run database migrations
 echo [3/5] Running database migrations...
-cd /d "%PROJECT_DIR%\backend"
-where alembic >nul 2>&1
-if %errorlevel% equ 0 (
-    alembic upgrade head
-) else (
-    python -m alembic upgrade head
-)
+cd /d "%BACKEND_DIR%"
+"%PYTHON%" -m alembic upgrade head
 if %errorlevel% neq 0 (
     echo WARNING: Alembic migrations encountered an issue. Check output above.
 )
@@ -67,15 +61,16 @@ echo [4/5] Starting RQ queue worker...
 where wsl >nul 2>&1
 if %errorlevel% equ 0 (
     echo Starting worker in WSLg namespace wrapper...
-    start "Lead Radar Worker" wsl -e bash -c "cd /mnt/c/klados/lead-radar/backend 2>/dev/null || cd /mnt/c/klados/backend; chmod +x run_camoufox.sh; ./run_camoufox.sh python -m app.worker"
+    for /f "delims=" %%P in ('wsl wslpath -a "%BACKEND_DIR%"') do set "WSL_BACKEND_DIR=%%P"
+    start "Klados Worker" wsl -e bash -c "cd '!WSL_BACKEND_DIR!' && source .venv-linux/bin/activate && chmod +x run_camoufox.sh && ./run_camoufox.sh python -m app.worker"
 ) else (
     echo WSL not detected. Starting native Python worker...
-    start "Lead Radar Worker" cmd /k "cd /d %PROJECT_DIR%\backend && python -m app.worker"
+    start "Klados Worker" cmd /k "cd /d "%BACKEND_DIR%" && "%PYTHON%" -m app.worker"
 )
 
 :: 5. Start FastAPI backend
 echo [5/5] Starting FastAPI backend on port 8000...
-start "Lead Radar API" cmd /k "cd /d %PROJECT_DIR%\backend && python -m uvicorn app.main:app --host 0.0.0.0 --port 8000"
+start "Klados API" cmd /k "cd /d "%BACKEND_DIR%" && "%PYTHON%" -m uvicorn app.main:app --host 0.0.0.0 --port 8000"
 
 :: 6. Start Next.js frontend
 echo Starting Next.js frontend on port 3000...

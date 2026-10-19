@@ -1,4 +1,4 @@
-"""Comprehensive niche and city expansion registry for Lead Radar.
+"""Comprehensive niche and city expansion registry for Klados.
 
 Contains:
 - BUSINESS_NICHES: 100+ localized SMB search keywords covering Fitness, Retail & Gadgets,

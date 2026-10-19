@@ -1,7 +1,23 @@
+name: klados
+
+# Local dev (start.sh / start.bat) only brings up `postgres` and `redis`;
+# `docker compose up --build` (start_radar.*) runs the whole stack.
+
+x-backend-env: &backend-env
+  POSTGRES_USER: postgres
+  POSTGRES_PASSWORD: postgrespassword
+  POSTGRES_HOST: postgres
+  POSTGRES_PORT: 5432
+  POSTGRES_DB: leads_db
+  REDIS_HOST: redis
+  REDIS_PORT: 6379
+  # Ollama runs on the host, not in the stack.
+  OLLAMA_URL: http://host.docker.internal:11434/api/generate
+
 services:
   postgres:
     image: postgres:16
-    container_name: lead_radar_postgres
+    container_name: klados_postgres
     restart: unless-stopped
     environment:
       POSTGRES_DB: leads_db
@@ -19,7 +35,7 @@ services:
 
   redis:
     image: redis:7
-    container_name: lead_radar_redis
+    container_name: klados_redis
     restart: unless-stopped
     ports:
       - "6379:6379"
@@ -35,16 +51,10 @@ services:
     build:
       context: .
       dockerfile: Dockerfile.api
-    container_name: lead_radar_api
+    container_name: klados_api
     restart: unless-stopped
     environment:
-      POSTGRES_USER: postgres
-      POSTGRES_PASSWORD: postgrespassword
-      POSTGRES_HOST: postgres
-      POSTGRES_PORT: 5432
-      POSTGRES_DB: leads_db
-      REDIS_HOST: redis
-      REDIS_PORT: 6379
+      <<: *backend-env
     ports:
       - "8000:8000"
     depends_on:
@@ -57,19 +67,15 @@ services:
     build:
       context: .
       dockerfile: Dockerfile.worker
-    container_name: lead_radar_worker
+    container_name: klados_worker
     restart: unless-stopped
     environment:
-      POSTGRES_USER: postgres
-      POSTGRES_PASSWORD: postgrespassword
-      POSTGRES_HOST: postgres
-      POSTGRES_PORT: 5432
-      POSTGRES_DB: leads_db
-      REDIS_HOST: redis
-      REDIS_PORT: 6379
+      <<: *backend-env
+    extra_hosts:
+      - "host.docker.internal:host-gateway"
     depends_on:
-      postgres:
-        condition: service_healthy
+      api:
+        condition: service_started
       redis:
         condition: service_healthy
 
@@ -77,7 +83,7 @@ services:
     build:
       context: .
       dockerfile: Dockerfile.frontend
-    container_name: lead_radar_frontend
+    container_name: klados_frontend
     restart: unless-stopped
     ports:
       - "3000:3000"
@@ -85,5 +91,9 @@ services:
       - api
 
 volumes:
+  # Pinned to the names the volumes had when this compose file lived in
+  # lead-radar/backend/, so existing leads survive the move.
   postgres_data:
+    name: backend_postgres_data
   redis_data:
+    name: backend_redis_data

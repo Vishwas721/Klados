@@ -1,6 +1,6 @@
-# Lead Radar Architectural Audit & System State
+# Klados Architectural Audit & System State
 
-This file documents the exact hardcoded values, rules, and logic currently implemented in the Lead Radar codebase (`backend/`, `frontend/`, and root scripts) as of the current state.
+This file documents the exact hardcoded values, rules, and logic currently implemented in the Klados codebase (`backend/`, `frontend/`, and root scripts) as of the current state.
 
 ## 1. Scraping Velocities & Anti-Ban Safeguards
 
