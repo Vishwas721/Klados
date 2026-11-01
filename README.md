@@ -80,9 +80,12 @@ variables or `backend/.env`:
 | `MAX_LEADS_PER_CELL` | `20` |
 | `AUDIT_DELAY_MIN_S` / `AUDIT_DELAY_MAX_S` | `3` / `7` |
 | `OLLAMA_URL` / `OLLAMA_MODEL` | `http://localhost:11434/api/generate` / `llama3:8b` |
+| `MAPS_BLOCK_COOLDOWN_S` | `3600`, pause after Google serves a CAPTCHA |
 | `CORS_ORIGINS` | `["http://localhost:3000","http://127.0.0.1:3000"]` |
+| `API_KEY` | unset (open); when set, `/api` requires `X-API-Key` |
 
-Frontend: `NEXT_PUBLIC_API_BASE_URL` (default `http://localhost:8000`).
+Frontend: `NEXT_PUBLIC_API_BASE_URL` (default `http://localhost:8000`) and
+`NEXT_PUBLIC_API_KEY` (must match `API_KEY` when that is set).
 
 Cities and niches are configured in
 `backend/app/services/discovery/targets.py`. A city must have a bounding box
