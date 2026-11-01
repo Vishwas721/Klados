@@ -9,6 +9,14 @@ import {
 } from "./types";
 
 export const API_BASE_URL = process.env.NEXT_PUBLIC_API_BASE_URL ?? "http://localhost:8000";
+const API_KEY = process.env.NEXT_PUBLIC_API_KEY;
+
+/** fetch against the API, adding the X-API-Key header when one is configured. */
+function apiFetch(path: string, init: RequestInit = {}): Promise<Response> {
+  const headers = new Headers(init.headers);
+  if (API_KEY) headers.set("X-API-Key", API_KEY);
+  return fetch(`${API_BASE_URL}${path}`, { cache: "no-store", ...init, headers });
+}
 
 export class ApiError extends Error {
   status: number;
@@ -36,7 +44,7 @@ async function ensureOk(res: Response, fallback: string): Promise<Response> {
 }
 
 async function getJson<T>(path: string, fallback: string): Promise<T> {
-  const res = await fetch(`${API_BASE_URL}${path}`, { cache: "no-store" });
+  const res = await apiFetch(path);
   return (await ensureOk(res, fallback)).json();
 }
 
@@ -57,7 +65,7 @@ export async function fetchLeadStats(): Promise<LeadStats> {
 }
 
 export async function updateLeadStatus(id: string, status: OutreachStatus): Promise<Lead> {
-  const res = await fetch(`${API_BASE_URL}/api/leads/${id}/status`, {
+  const res = await apiFetch(`/api/leads/${id}/status`, {
     method: "PATCH",
     headers: { "Content-Type": "application/json" },
     body: JSON.stringify({ status }),
@@ -66,7 +74,7 @@ export async function updateLeadStatus(id: string, status: OutreachStatus): Prom
 }
 
 export async function optOutLead(id: string): Promise<Lead> {
-  const res = await fetch(`${API_BASE_URL}/api/leads/${id}/opt-out`, {
+  const res = await apiFetch(`/api/leads/${id}/opt-out`, {
     method: "POST",
   });
   return (await ensureOk(res, "Failed to opt out lead")).json();
@@ -77,7 +85,7 @@ export async function triggerScan(
   city: string,
   maxCells = 6
 ): Promise<ScanTriggerResponse> {
-  const res = await fetch(`${API_BASE_URL}/api/scrape/trigger`, {
+  const res = await apiFetch("/api/scrape/trigger", {
     method: "POST",
     headers: { "Content-Type": "application/json" },
     body: JSON.stringify({ query, city, max_cells: maxCells }),

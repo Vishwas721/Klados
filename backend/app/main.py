@@ -1,8 +1,9 @@
 from datetime import datetime, timezone
+import secrets
 from typing import Literal
 import uuid
 
-from fastapi import Depends, FastAPI, HTTPException, Query
+from fastapi import Depends, FastAPI, Header, HTTPException, Query, Request
 from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel, Field
 from redis import Redis
@@ -17,7 +18,24 @@ from app.db.session import get_db
 from app.services.discovery.coverage import MAPS_BLOCKED_KEY, mark_seen, unseen_cells
 from app.services.discovery.targets import BUSINESS_NICHES, CITY_BOUNDING_BOXES
 
-app = FastAPI(title=settings.PROJECT_NAME)
+
+
+def require_api_key(request: Request, x_api_key: str | None = Header(default=None)) -> None:
+    """Enforce settings.API_KEY on /api routes when one is configured.
+
+    Besides authenticating, the custom header forces a CORS preflight, so
+    other sites open in the browser can't fire bodiless POSTs (e.g. opt-out)
+    at the local API.
+    """
+    if not settings.API_KEY or not request.url.path.startswith("/api/"):
+        return
+    if request.method == "OPTIONS":
+        return
+    if x_api_key is None or not secrets.compare_digest(x_api_key, settings.API_KEY):
+        raise HTTPException(status_code=401, detail="Missing or invalid X-API-Key header")
+
+
+app = FastAPI(title=settings.PROJECT_NAME, dependencies=[Depends(require_api_key)])
 
 app.add_middleware(
     CORSMiddleware,

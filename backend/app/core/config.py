@@ -18,6 +18,10 @@ class Settings(BaseSettings):
     # JSON list when set via env, e.g. CORS_ORIGINS='["http://localhost:3000"]'
     CORS_ORIGINS: list[str] = ["http://localhost:3000", "http://127.0.0.1:3000"]
 
+    # When set, every /api request must send it as the X-API-Key header.
+    # Give the dashboard the same value via NEXT_PUBLIC_API_KEY.
+    API_KEY: str | None = None
+
     QUEUE_NAME: str = "lead_tasks"
 
     # Safe IP limits: cap leads per cell, pace audits, and cap leads per day
