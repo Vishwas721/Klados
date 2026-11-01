@@ -10,6 +10,7 @@ Contains:
 
 from itertools import cycle
 import random
+import re
 from typing import Iterator
 
 BUSINESS_NICHES: list[str] = [
@@ -309,3 +310,24 @@ def get_next_search_target(mode: str = "sequential") -> tuple[str, str]:
         return random.choice(PRIORITIZED_CITIES), random.choice(BUSINESS_NICHES)
 
     return next(_SEQUENTIAL_ROTATOR)
+
+
+def _singular(word: str) -> str:
+    if len(word) <= 3:
+        return word
+    if word.endswith("ies"):
+        return word[:-3] + "y"
+    if word.endswith("sses"):
+        return word[:-2]
+    if word.endswith(("ches", "shes", "xes")):
+        return word[:-2]
+    if word.endswith("s") and not word.endswith(("ss", "us", "is")):
+        return word[:-1]
+    return word
+
+
+def niche_key(niche: str) -> str:
+    """Canonical form of a niche, so 'Gyms' / 'gym' and
+    'Pet Care & Veterinary' / 'pet care and veterinary' are one target."""
+    words = re.sub(r"[^a-z0-9]+", " ", niche.lower().replace("&", " and ")).split()
+    return " ".join(_singular(w) for w in words)

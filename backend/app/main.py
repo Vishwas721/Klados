@@ -11,6 +11,7 @@ from sqlalchemy import func, select
 from sqlalchemy.orm import Session
 
 from app.core.config import settings
+from app.db.lookups import clear_stale_exhaustion, find_campaign, find_search_history
 from app.db.models import CampaignTracker, Lead, SearchHistory
 from app.db.session import get_db
 from app.services.discovery.coverage import MAPS_BLOCKED_KEY, mark_seen, unseen_cells
@@ -132,16 +133,9 @@ def health():
 
 @app.post("/api/scrape/trigger", response_model=ScrapeTriggerResponse)
 def trigger_scrape(payload: ScrapeTriggerRequest, db: Session = Depends(get_db)):
-    norm_niche = payload.query.strip().lower()
-    norm_city = payload.city.strip().lower()
-
-    # 1. Daily Execution Lock Check (24-hour lock per niche + city)
-    history = db.execute(
-        select(SearchHistory).where(
-            func.lower(SearchHistory.niche) == norm_niche,
-            func.lower(SearchHistory.city) == norm_city,
-        )
-    ).scalar_one_or_none()
+    # 1. Daily Execution Lock Check (24-hour lock per niche + city, matched
+    # on canonical keys so "Gyms" and "gym" share one lock)
+    history = find_search_history(db, payload.city, payload.query)
 
     if history and history.is_locked:
         unlock_time = history.locked_until
@@ -186,6 +180,11 @@ def trigger_scrape(payload: ScrapeTriggerRequest, db: Session = Depends(get_db))
                 f"'{payload.query}' recently. Try a different city or niche."
             ),
         )
+
+    # Unscanned cells again (the coverage record expired): no longer exhausted
+    tracker = find_campaign(db, payload.city, payload.query)
+    if tracker and tracker.is_exhausted:
+        tracker.is_exhausted = False
 
     selected_cells = candidates[: payload.max_cells]
     mark_seen(redis_conn, payload.city, payload.query, selected_cells)
@@ -250,6 +249,7 @@ def get_search_history(
 
 @app.get("/api/campaigns/exhausted", response_model=list[ExhaustedCampaignOut])
 def get_exhausted_campaigns(db: Session = Depends(get_db)):
+    clear_stale_exhaustion(db)
     stmt = select(CampaignTracker).where(CampaignTracker.is_exhausted.is_(True))
     return db.execute(stmt).scalars().all()
 

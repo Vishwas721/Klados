@@ -6,7 +6,8 @@ expansion), so both agree on the Redis key and every write refreshes its TTL.
 
 from redis import Redis
 
-from app.services.discovery.geo_grid import generate_city_cells
+from app.services.discovery.geo_grid import generate_city_cells, normalize_city_key
+from app.services.discovery.targets import niche_key
 
 # Long enough to work through a city over many daily runs, short enough
 # that a fully covered city is eventually rescanned for new businesses.
@@ -17,7 +18,7 @@ MAPS_BLOCKED_KEY = "maps_blocked"
 
 
 def seen_cells_key(city: str, niche: str) -> str:
-    return f"seen_cells:{city.strip().lower()}:{niche.strip().lower()}"
+    return f"seen_cells:{normalize_city_key(city)}:{niche_key(niche)}"
 
 
 def mark_seen(r: Redis, city: str, niche: str, cells: list[str]) -> None:

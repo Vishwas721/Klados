@@ -14,11 +14,11 @@ import h3
 from redis import Redis
 from rq import Queue
 from rq.timeouts import JobTimeoutException
-from sqlalchemy import func, select
 from sqlalchemy.dialects.postgresql import insert as pg_insert
 from sqlalchemy.orm import Session
 
 from app.core.config import settings
+from app.db.lookups import clear_stale_exhaustion, find_campaign, find_search_history
 from app.db.models import CampaignTracker, Lead, SearchHistory
 from app.db.session import SessionLocal
 from app.services.auditor.site_auditor import SiteAuditor
@@ -149,14 +149,7 @@ def _update_search_history(
 ) -> None:
     """Update or initialize search_history entry in PostgreSQL."""
     try:
-        norm_niche = niche.strip().lower()
-        norm_city = city.strip().lower()
-        rec = db.execute(
-            select(SearchHistory).where(
-                func.lower(SearchHistory.niche) == norm_niche,
-                func.lower(SearchHistory.city) == norm_city,
-            )
-        ).scalar_one_or_none()
+        rec = find_search_history(db, city, niche)
 
         if rec is None:
             rec = SearchHistory(
@@ -506,10 +499,7 @@ def _handle_exhaustion(query: str, city: str) -> None:
         norm_niche = query.strip()
         now = datetime.now(timezone.utc)
 
-        tracker = db.execute(select(CampaignTracker).where(
-            func.lower(CampaignTracker.city) == norm_city.lower(),
-            func.lower(CampaignTracker.niche) == norm_niche.lower(),
-        )).scalar_one_or_none()
+        tracker = find_campaign(db, norm_city, norm_niche)
 
         if not tracker:
             db.add(CampaignTracker(city=norm_city, niche=norm_niche, is_exhausted=True, last_scraped_at=now))
@@ -522,15 +512,12 @@ def _handle_exhaustion(query: str, city: str) -> None:
         if get_leads_collected_today(redis_conn) >= DAILY_LIMIT:
             return
 
+        clear_stale_exhaustion(db)
         task_queue = Queue(QUEUE_NAME, connection=redis_conn)
         for _ in range(50):
             new_city, new_niche = get_next_search_target("random")
-            is_exh = db.execute(select(CampaignTracker.id).where(
-                func.lower(CampaignTracker.city) == new_city.lower(),
-                func.lower(CampaignTracker.niche) == new_niche.lower(),
-                CampaignTracker.is_exhausted.is_(True),
-            )).scalar_one_or_none()
-            if is_exh:
+            candidate = find_campaign(db, new_city, new_niche)
+            if candidate and candidate.is_exhausted:
                 continue
 
             try:
