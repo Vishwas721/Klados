@@ -46,7 +46,8 @@ export function LeadsTable({ leads, onWhatsAppSent, onOptOut }: LeadsTableProps)
                     href={lead.website_url}
                     target="_blank"
                     rel="noreferrer"
-                    className="text-xs text-indigo-600 hover:underline"
+                    title={lead.website_url}
+                    className="block max-w-xs truncate text-xs text-indigo-600 hover:underline"
                   >
                     {lead.website_url}
                   </a>

@@ -2,8 +2,15 @@
 
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { RefreshCw } from "lucide-react";
-import { Lead, SearchHistoryItem, ScanTriggerResponse } from "@/lib/types";
-import { fetchLeads, fetchSearchHistory, optOutLead, updateLeadStatus } from "@/lib/api";
+import { Lead, LeadStats, SearchHistoryItem, ScanTriggerResponse } from "@/lib/types";
+import {
+  API_BASE_URL,
+  fetchLeadStats,
+  fetchLeads,
+  fetchSearchHistory,
+  optOutLead,
+  updateLeadStatus,
+} from "@/lib/api";
 import { useToast } from "@/lib/useToast";
 import { MetricCards } from "@/components/MetricCards";
 import { CoverageHistory } from "@/components/CoverageHistory";
@@ -19,6 +26,8 @@ const POLL_INTERVAL_MS = 15_000;         // every 15 s
 
 export default function DashboardPage() {
   const [leads, setLeads] = useState<Lead[]>([]);
+  const [stats, setStats] = useState<LeadStats | null>(null);
+  const [refreshKey, setRefreshKey] = useState(0);
   const [searchHistory, setSearchHistory] = useState<SearchHistoryItem[]>([]);
   const [loading, setLoading] = useState(true);
   const [historyLoading, setHistoryLoading] = useState(false);
@@ -41,8 +50,9 @@ export default function DashboardPage() {
     if (!silent) setLoading(true);
     setError(null);
     try {
-      const fresh = await fetchLeads({ limit: 200 });
+      const [fresh, freshStats] = await Promise.all([fetchLeads({ limit: 500 }), fetchLeadStats()]);
       setLeads(fresh);
+      setStats(freshStats);
     } catch (err) {
       setError(err instanceof Error ? err.message : "Failed to load leads");
     } finally {
@@ -82,6 +92,7 @@ export default function DashboardPage() {
       }
       loadLeads(/* silent */ true);
       loadHistory();
+      setRefreshKey((k) => k + 1);
     }, POLL_INTERVAL_MS);
   }, [loadLeads, loadHistory, toast]);
 
@@ -96,7 +107,7 @@ export default function DashboardPage() {
   const handleScanQueued = useCallback(
     (result: ScanTriggerResponse, query: string, city: string) => {
       toast(
-        `✅ Radar launched for "${query}" in "${city}" (${result.cells_queued} cell${result.cells_queued !== 1 ? "s" : ""} queued). Auto-refreshing…`,
+        `✅ Radar launched for "${query}" in "${city}" (${result.cells_queued} cell${result.cells_queued !== 1 ? "s" : ""} queued, ${result.cells_remaining.toLocaleString()} still unscanned). Auto-refreshing…`,
         "success",
         6000
       );
@@ -107,16 +118,9 @@ export default function DashboardPage() {
   );
 
   const handleScanError = useCallback(
-    (message: string, isRateLimit?: boolean, niche?: string, city?: string) => {
-      if (isRateLimit) {
-        toast(
-          `Daily limit reached for ${niche || "this niche"} in ${city || "this city"}. Check back tomorrow.`,
-          "error",
-          7000
-        );
-      } else {
-        toast(`❌ Scan failed: ${message}`, "error", 6000);
-      }
+    (message: string, isRateLimit?: boolean) => {
+      // The backend's message already names the combo and its unlock time
+      toast(isRateLimit ? message : `❌ Scan failed: ${message}`, "error", isRateLimit ? 8000 : 6000);
     },
     [toast]
   );
@@ -130,19 +134,21 @@ export default function DashboardPage() {
   const handleOptOut = useCallback(async (id: string) => {
     const updated = await optOutLead(id);
     setLeads((prev) => prev.map((l) => (l.id === id ? updated : l)));
+    fetchLeadStats().then(setStats).catch(() => {});
   }, []);
 
   // ── Derived state ────────────────────────────────────────────────────────
+  // Server-side counts cover every lead, not just the page loaded here
   const counts = useMemo(
     () => ({
-      ALL: leads.filter((l) => !l.opted_out).length,
-      DIGITAL_GHOST: leads.filter((l) => l.category === "DIGITAL_GHOST" && !l.opted_out).length,
-      DIGITAL_DINOSAUR: leads.filter((l) => l.category === "DIGITAL_DINOSAUR" && !l.opted_out).length,
-      LAGGY_UX: leads.filter((l) => l.category === "LAGGY_UX" && !l.opted_out).length,
-      AUTOMATION_CANDIDATE: leads.filter((l) => l.category === "AUTOMATION_CANDIDATE" && !l.opted_out).length,
-      OPTED_OUT: leads.filter((l) => l.opted_out).length,
+      ALL: stats?.total ?? 0,
+      DIGITAL_GHOST: stats?.by_category.DIGITAL_GHOST ?? 0,
+      DIGITAL_DINOSAUR: stats?.by_category.DIGITAL_DINOSAUR ?? 0,
+      LAGGY_UX: stats?.by_category.LAGGY_UX ?? 0,
+      AUTOMATION_CANDIDATE: stats?.by_category.AUTOMATION_CANDIDATE ?? 0,
+      OPTED_OUT: stats?.opted_out ?? 0,
     }),
-    [leads]
+    [stats]
   );
 
   const filteredLeads = useMemo(() => {
@@ -194,12 +200,13 @@ export default function DashboardPage() {
           onError={handleScanError}
           prefillQuery={prefillNiche}
           prefillCity={prefillCity}
+          refreshKey={refreshKey}
         />
       </div>
 
       {/* ── Metric cards ─────────────────────────────────────────────────── */}
       <div className="mt-6">
-        <MetricCards leads={leads.filter((l) => !l.opted_out)} />
+        <MetricCards counts={counts} />
       </div>
 
       {/* ── Coverage / Daily Lock History ─────────────────────────────────── */}
@@ -223,7 +230,7 @@ export default function DashboardPage() {
       {/* Error banner */}
       {error && (
         <div className="mt-4 rounded-lg bg-red-50 px-4 py-3 text-sm text-red-700">
-          {error} — is the API running at http://localhost:8000?
+          {error} — is the API running at {API_BASE_URL}?
         </div>
       )}
 

@@ -38,11 +38,6 @@ export interface Lead {
   status: OutreachStatus;
 }
 
-export interface ScanTriggerResponse {
-  task_ids: string[];
-  cells_queued: number;
-}
-
 export interface SearchHistoryItem {
   id: string;
   niche: string;
@@ -52,4 +47,27 @@ export interface SearchHistoryItem {
   status: string;
   is_locked: boolean;
   locked_until: string;
+}
+
+export interface ScanTriggerResponse {
+  task_ids: string[];
+  cells_queued: number;
+  cells_remaining: number;
+}
+
+export interface LeadStats {
+  total: number;
+  by_category: Partial<Record<LeadCategory, number>>;
+  opted_out: number;
+}
+
+export interface ExhaustedCampaign {
+  city: string;
+  niche: string;
+  last_scraped_at: string;
+}
+
+export interface ScanTargets {
+  cities: string[];
+  niches: string[];
 }

@@ -1,17 +1,11 @@
 import { Bot, Ghost, Skull, Turtle, Users } from "lucide-react";
-import { Lead } from "@/lib/types";
+import { LeadCategory } from "@/lib/types";
 
-export function MetricCards({ leads }: { leads: Lead[] }) {
-  const counts = {
-    total: leads.length,
-    DIGITAL_GHOST: leads.filter((l) => l.category === "DIGITAL_GHOST").length,
-    DIGITAL_DINOSAUR: leads.filter((l) => l.category === "DIGITAL_DINOSAUR").length,
-    LAGGY_UX: leads.filter((l) => l.category === "LAGGY_UX").length,
-    AUTOMATION_CANDIDATE: leads.filter((l) => l.category === "AUTOMATION_CANDIDATE").length,
-  };
+type MetricCounts = Record<LeadCategory | "ALL", number>;
 
+export function MetricCards({ counts }: { counts: MetricCounts }) {
   const cards = [
-    { label: "Total Extracted", value: counts.total, icon: Users, accent: "text-slate-900", bg: "bg-slate-50" },
+    { label: "Total Extracted", value: counts.ALL, icon: Users, accent: "text-slate-900", bg: "bg-slate-50" },
     { label: "Digital Ghosts", value: counts.DIGITAL_GHOST, icon: Ghost, accent: "text-slate-600", bg: "bg-slate-100" },
     { label: "Digital Dinosaurs", value: counts.DIGITAL_DINOSAUR, icon: Skull, accent: "text-amber-600", bg: "bg-amber-50" },
     { label: "Laggy UX", value: counts.LAGGY_UX, icon: Turtle, accent: "text-red-600", bg: "bg-red-50" },

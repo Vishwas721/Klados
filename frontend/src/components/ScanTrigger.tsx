@@ -2,63 +2,46 @@
 
 import { useState, useRef, useEffect, useMemo } from "react";
 import { Radar, Loader2, MapPin, Search, Dices, AlertTriangle } from "lucide-react";
-import { triggerScan, ApiError, fetchExhaustedCampaigns } from "@/lib/api";
-import { ScanTriggerResponse } from "@/lib/types";
+import { triggerScan, ApiError, fetchExhaustedCampaigns, fetchScanTargets } from "@/lib/api";
+import { ExhaustedCampaign, ScanTargets, ScanTriggerResponse } from "@/lib/types";
 
 interface ScanTriggerProps {
   onScanQueued: (result: ScanTriggerResponse, query: string, city: string) => void;
-  onError: (message: string, isRateLimit?: boolean, niche?: string, city?: string) => void;
+  onError: (message: string, isRateLimit?: boolean) => void;
   prefillQuery?: string;
   prefillCity?: string;
+  /** Bump to re-fetch the exhausted-combo list (e.g. while a scan is running). */
+  refreshKey?: number;
 }
 
-const RANDOM_NICHES = [
-  "Gyms & Fitness Centers",
-  "Dental Clinics",
-  "Unisex Salons & Spas",
-  "Interior Designers",
-  "Car Detailing & Wash",
-  "Boutique Specialty Cafes",
-  "Plumbing & Sanitaryware",
-  "Multi-brand Auto Mechanics",
-  "Modular Kitchen Designers",
-  "Physiotherapy Clinics",
-  "Pet Care & Veterinary",
-  "Wedding Photographers",
-  "Diagnostic Laboratories",
-  "Architects & Civil Engineers",
-  "Ayurvedic Wellness Centers",
-];
+const DEFAULT_CITY = "Bengaluru";
 
-const RANDOM_CITIES = [
-  "Bengaluru",
-  "Mysuru",
-  "Mangaluru",
-  "Hubballi",
-  "Belagavi",
-  "Mumbai",
-  "Pune",
-  "Hyderabad",
-  "Chennai",
-  "Delhi",
-];
+function sameCombo(a: { city: string; niche: string }, city: string, niche: string): boolean {
+  return a.city.toLowerCase() === city.toLowerCase() && a.niche.toLowerCase() === niche.toLowerCase();
+}
 
 export function ScanTrigger({
   onScanQueued,
   onError,
   prefillQuery = "",
   prefillCity = "",
+  refreshKey = 0,
 }: ScanTriggerProps) {
   const [query, setQuery] = useState("");
   const [city, setCity] = useState("");
   const [loading, setLoading] = useState(false);
   const queryRef = useRef<HTMLInputElement>(null);
 
-  const [exhaustedCombos, setExhaustedCombos] = useState<{city: string, niche: string, last_scraped_at: string}[]>([]);
+  const [targets, setTargets] = useState<ScanTargets>({ cities: [], niches: [] });
+  const [exhaustedCombos, setExhaustedCombos] = useState<ExhaustedCampaign[]>([]);
+
+  useEffect(() => {
+    fetchScanTargets().then(setTargets).catch(console.error);
+  }, []);
 
   useEffect(() => {
     fetchExhaustedCampaigns().then(setExhaustedCombos).catch(console.error);
-  }, []);
+  }, [refreshKey]);
 
   useEffect(() => {
     if (prefillQuery) setQuery(prefillQuery);
@@ -69,32 +52,28 @@ export function ScanTrigger({
   }, [prefillQuery, prefillCity]);
 
   const handleSurpriseMe = () => {
-    let availableCombos = [];
-    for (const c of RANDOM_CITIES) {
-      for (const n of RANDOM_NICHES) {
-        if (!exhaustedCombos.some(e => e.city.toLowerCase() === c.toLowerCase() && e.niche.toLowerCase() === n.toLowerCase())) {
-          availableCombos.push({ city: c, niche: n });
-        }
+    const { cities, niches } = targets;
+    if (!cities.length || !niches.length) return;
+
+    // Random sampling beats enumerating all ~2,000 combos; retry a few times
+    // to dodge exhausted ones.
+    for (let attempt = 0; attempt < 25; attempt++) {
+      const c = cities[Math.floor(Math.random() * cities.length)];
+      const n = niches[Math.floor(Math.random() * niches.length)];
+      if (!exhaustedCombos.some((e) => sameCombo(e, c, n)) || attempt === 24) {
+        setQuery(n);
+        setCity(c);
+        return;
       }
-    }
-    
-    if (availableCombos.length > 0) {
-      const choice = availableCombos[Math.floor(Math.random() * availableCombos.length)];
-      setQuery(choice.niche);
-      setCity(choice.city);
-    } else {
-      const randomNiche = RANDOM_NICHES[Math.floor(Math.random() * RANDOM_NICHES.length)];
-      const randomCity = RANDOM_CITIES[Math.floor(Math.random() * RANDOM_CITIES.length)];
-      setQuery(randomNiche);
-      setCity(randomCity);
     }
   };
 
-  const resolvedCity = city.trim() || "Bengaluru";
-  
-  const isExhausted = useMemo(() => {
-    return exhaustedCombos.some(e => e.city.toLowerCase() === resolvedCity.toLowerCase() && e.niche.toLowerCase() === query.trim().toLowerCase());
-  }, [exhaustedCombos, resolvedCity, query]);
+  const resolvedCity = city.trim() || DEFAULT_CITY;
+
+  const isExhausted = useMemo(
+    () => exhaustedCombos.some((e) => sameCombo(e, resolvedCity, query.trim())),
+    [exhaustedCombos, resolvedCity, query]
+  );
 
   const handleSubmit = async (e: React.FormEvent) => {
     e.preventDefault();
@@ -111,17 +90,8 @@ export function ScanTrigger({
       const result = await triggerScan(q, resolvedCity, 6);
       onScanQueued(result, q, resolvedCity);
     } catch (err) {
-      if (err instanceof ApiError && err.status === 429) {
-        // Daily execution lock hit
-        onError(
-          `Daily limit reached for "${q}" in "${resolvedCity}". Check back tomorrow.`,
-          true,
-          q,
-          resolvedCity
-        );
-      } else {
-        onError(err instanceof Error ? err.message : "Failed to trigger scan", false, q, resolvedCity);
-      }
+      const message = err instanceof Error ? err.message : "Failed to trigger scan";
+      onError(message, err instanceof ApiError && err.status === 429);
     } finally {
       setLoading(false);
     }
@@ -142,8 +112,8 @@ export function ScanTrigger({
           <button
             type="button"
             onClick={handleSurpriseMe}
-            disabled={loading}
-            className="inline-flex items-center gap-1 rounded-lg border border-gray-200 bg-white px-2 py-1 text-xs font-medium text-gray-700 hover:bg-gray-50 shadow-xs"
+            disabled={loading || !targets.cities.length}
+            className="inline-flex items-center gap-1 rounded-lg border border-gray-200 bg-white px-2 py-1 text-xs font-medium text-gray-700 hover:bg-gray-50 shadow-xs disabled:opacity-50"
           >
             <Dices className="h-3.5 w-3.5 text-indigo-600" />
             Surprise Me
@@ -166,17 +136,23 @@ export function ScanTrigger({
               ref={queryRef}
               id="scan-query"
               type="text"
+              list="scan-niche-options"
               value={query}
               onChange={(e) => setQuery(e.target.value)}
               placeholder="e.g. Dental Clinics, Gyms, Salons"
               disabled={loading}
               className="w-full rounded-xl border border-gray-200 bg-white py-2 pl-9 pr-3 text-sm placeholder-gray-400 shadow-sm focus:border-indigo-400 focus:outline-none focus:ring-2 focus:ring-indigo-200 disabled:opacity-50"
             />
+            <datalist id="scan-niche-options">
+              {targets.niches.map((n) => (
+                <option key={n} value={n} />
+              ))}
+            </datalist>
           </div>
         </div>
 
         {/* City input */}
-        <div className="flex-1 sm:max-w-[200px]">
+        <div className="flex-1 sm:max-w-[220px]">
           <label
             htmlFor="scan-city"
             className="mb-1 block text-xs font-semibold uppercase tracking-wider text-gray-500"
@@ -188,12 +164,18 @@ export function ScanTrigger({
             <input
               id="scan-city"
               type="text"
+              list="scan-city-options"
               value={city}
               onChange={(e) => setCity(e.target.value)}
-              placeholder="Bengaluru (default)"
+              placeholder={`${DEFAULT_CITY} (default)`}
               disabled={loading}
               className="w-full rounded-xl border border-gray-200 bg-white py-2 pl-9 pr-3 text-sm placeholder-gray-400 shadow-sm focus:border-indigo-400 focus:outline-none focus:ring-2 focus:ring-indigo-200 disabled:opacity-50"
             />
+            <datalist id="scan-city-options">
+              {targets.cities.map((c) => (
+                <option key={c} value={c} />
+              ))}
+            </datalist>
           </div>
         </div>
 
@@ -201,8 +183,8 @@ export function ScanTrigger({
         <button
           type="button"
           onClick={handleSurpriseMe}
-          disabled={loading}
-          title="Fill with a random niche &amp; city combination"
+          disabled={loading || !targets.cities.length}
+          title="Fill with a random niche & city combination"
           className="hidden sm:inline-flex items-center gap-1.5 rounded-xl border border-gray-200 bg-white px-3.5 py-2 text-sm font-medium text-gray-700 shadow-sm transition hover:bg-gray-50 hover:text-indigo-600 focus:outline-none focus:ring-2 focus:ring-indigo-200 disabled:opacity-50"
         >
           <Dices className="h-4 w-4 text-indigo-600" />
@@ -215,11 +197,7 @@ export function ScanTrigger({
           disabled={loading || !query.trim() || isExhausted}
           className="inline-flex items-center justify-center gap-2 rounded-xl bg-indigo-600 px-5 py-2 text-sm font-semibold text-white shadow-sm transition-all hover:bg-indigo-700 focus:outline-none focus:ring-2 focus:ring-indigo-300 disabled:cursor-not-allowed disabled:opacity-50 sm:self-end"
         >
-          {loading ? (
-            <Loader2 className="h-4 w-4 animate-spin" />
-          ) : (
-            <Radar className="h-4 w-4" />
-          )}
+          {loading ? <Loader2 className="h-4 w-4 animate-spin" /> : <Radar className="h-4 w-4" />}
           {loading ? "Queueing…" : "Run Radar"}
         </button>
       </form>
@@ -227,7 +205,7 @@ export function ScanTrigger({
       {isExhausted && (
         <div className="text-sm text-red-600 flex items-center gap-2 px-2">
           <AlertTriangle className="h-4 w-4" />
-          <span>This combination has been fully scraped. Please try a different city or niche.</span>
+          <span>Every area of this city has been scanned for this niche. Try a different city or niche.</span>
         </div>
       )}
 
@@ -238,8 +216,11 @@ export function ScanTrigger({
             Fully Scraped Combos
           </h3>
           <div className="flex flex-wrap gap-2">
-            {exhaustedCombos.map((combo, idx) => (
-              <span key={idx} className="inline-flex items-center rounded-md bg-gray-100 px-2.5 py-0.5 text-xs font-medium text-gray-600">
+            {exhaustedCombos.map((combo) => (
+              <span
+                key={`${combo.city}:${combo.niche}`}
+                className="inline-flex items-center rounded-md bg-gray-100 px-2.5 py-0.5 text-xs font-medium text-gray-600"
+              >
                 {combo.city}: {combo.niche}
               </span>
             ))}
