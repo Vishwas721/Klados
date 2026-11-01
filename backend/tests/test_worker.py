@@ -17,6 +17,16 @@ class FakeQueue:
         FakeQueue.jobs.append(args)
 
 
+class FakeAuditor:
+    closed = 0
+
+    def audit(self, url):
+        return {"category": "DIGITAL_GHOST"}
+
+    def close(self):
+        FakeAuditor.closed += 1
+
+
 class FakeSession:
     def commit(self):
         pass
@@ -39,7 +49,7 @@ def stubbed(monkeypatch, fake_redis):
     monkeypatch.setattr(worker, "SessionLocal", FakeSession)
     monkeypatch.setattr(worker, "get_leads_collected_today", lambda r=None: counter["today"])
     monkeypatch.setattr(worker, "is_duplicate_lead", lambda *a, **k: False)
-    monkeypatch.setattr(worker, "audit_lead", lambda url: {"category": "DIGITAL_GHOST"})
+    monkeypatch.setattr(worker, "SiteAuditor", FakeAuditor)
     monkeypatch.setattr(worker.time, "sleep", lambda s: None)
     monkeypatch.setattr(
         worker, "_update_search_history", lambda db, q, c, n: calls["history"].append(n)
@@ -131,3 +141,16 @@ def test_fallback_audit_trims_call_log():
     audit = worker._fallback_audit("https://x.in", RuntimeError("Page.goto: boom\nCall log:\n - navigating"))
     assert audit["operational_bottleneck"] == "Audit failed: Page.goto: boom"
     assert audit["category"] == "LAGGY_UX"
+
+
+def test_auditor_closed_even_when_cell_errors(monkeypatch, stubbed):
+    FakeAuditor.closed = 0
+    monkeypatch.setattr(worker, "extract_places", lambda *a, **k: _places(1))
+
+    def explode(db, q, c, n):
+        raise RuntimeError("db down")
+
+    monkeypatch.setattr(worker, "_update_search_history", explode)
+    with pytest.raises(RuntimeError):
+        worker.process_h3_cell(generate_city_cells("Mysuru")[0], "Gyms", "Mysuru")
+    assert FakeAuditor.closed == 1

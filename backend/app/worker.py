@@ -21,7 +21,7 @@ from sqlalchemy.orm import Session
 from app.core.config import settings
 from app.db.models import CampaignTracker, Lead, SearchHistory
 from app.db.session import SessionLocal
-from app.services.auditor.site_auditor import audit_lead
+from app.services.auditor.site_auditor import SiteAuditor
 from app.services.discovery.coverage import mark_seen, unmark_seen, unseen_cells
 from app.services.discovery.geo_grid import cell_to_coords
 from app.services.discovery.gmaps_extractor import extract_places, is_duplicate_lead
@@ -209,6 +209,8 @@ def process_h3_cell(
     )
 
     db = SessionLocal()
+    # One browser for every audit in this cell, launched on first use
+    auditor = SiteAuditor()
     passed_validation = 0
     skipped_missing_name = 0
     skipped_missing_phone = 0
@@ -298,7 +300,7 @@ def process_h3_cell(
                 p_website,
             )
             try:
-                audit = audit_lead(p_website)
+                audit = auditor.audit(p_website)
                 logger.info(
                     "[worker] [Candidate %d/%d] Audit completed for '%s': category=%s, ssl=%s, mobile=%s, ttfb=%sms, tech=%s",
                     candidate_idx,
@@ -372,6 +374,7 @@ def process_h3_cell(
         _update_search_history(db, query, city, processed)
 
     finally:
+        auditor.close()
         db.close()
 
     logger.info(

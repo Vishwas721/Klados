@@ -45,3 +45,11 @@ def test_detect_stack_plain_site():
 
 def test_detect_stack_handles_missing_html():
     assert detect_stack(None)["detected_tech"] == []
+
+
+def test_site_auditor_skips_browser_for_ghosts():
+    from app.services.auditor.site_auditor import SiteAuditor
+
+    with SiteAuditor() as auditor:
+        assert auditor.audit(None) == {"category": "DIGITAL_GHOST"}
+        assert auditor._browser is None and auditor._loop is None

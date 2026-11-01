@@ -73,91 +73,143 @@ def describe_unreachable(error_message: str) -> str | None:
     return None
 
 
-async def _audit_lead_async(website_url: str) -> dict:
-    camoufox = AsyncCamoufox(
-        headless=camoufox_headless_mode(), geoip=True, humanize=True, os=["windows"]
-    )
-    launched = False
+async def _audit_page(page, website_url: str) -> dict:
+    started = time.monotonic()
     try:
-        browser = await camoufox.__aenter__()
-        launched = True
-        page = await browser.new_page()
-
-        started = time.monotonic()
+        await page.goto(website_url, timeout=NAV_TIMEOUT_MS)
+    except PlaywrightTimeoutError:
+        # A site that can't finish loading within the strict timeout is,
+        # by definition, laggy - categorize it rather than blow up the run.
         try:
-            await page.goto(website_url, timeout=NAV_TIMEOUT_MS)
-        except PlaywrightTimeoutError:
-            # A site that can't finish loading within the strict timeout is,
-            # by definition, laggy - categorize it rather than blow up the run.
-            try:
-                partial_html = await page.content()
-            except PlaywrightError:
-                partial_html = None
-            return {
-                "category": "LAGGY_UX",
-                "has_ssl": page.url.startswith("https://"),
-                "is_mobile_responsive": None,
-                "ttfb_ms": None,
-                "dom_load_time_ms": NAV_TIMEOUT_MS,
-                "operational_bottleneck": f"Site did not finish loading within {NAV_TIMEOUT_MS // 1000}s",
-                **detect_stack(partial_html),
-            }
-        except PlaywrightError as exc:
-            reason = describe_unreachable(str(exc))
-            if reason is None:
-                raise
-            # A listed website that doesn't resolve is as good as no website
-            return {
-                "category": "DIGITAL_GHOST",
-                "has_ssl": False,
-                "is_mobile_responsive": False,
-                "ttfb_ms": 0,
-                "dom_load_time_ms": 0,
-                "operational_bottleneck": reason,
-            }
-        elapsed_ms = (time.monotonic() - started) * 1000
-
-        # Judge HTTPS on where we landed: many listings say http:// but redirect
-        has_ssl = page.url.startswith("https://")
-
-        # Navigation timing is occasionally missing or zeroed by SPA routers;
-        # fall back to wall-clock time rather than scoring the site as instant.
-        metrics = await page.evaluate(_PERFORMANCE_JS) or {}
-        ttfb_ms = metrics.get("ttfb_ms") or 0.0
-        dom_load_time_ms = metrics.get("dom_load_time_ms") or elapsed_ms
-
-        is_mobile_responsive = await page.locator("meta[name='viewport']").count() > 0
-        stack = detect_stack(await page.content())
-
-        category = classify_site(has_ssl, is_mobile_responsive, ttfb_ms, dom_load_time_ms)
-        result = {
-            "category": category,
-            "has_ssl": has_ssl,
-            "is_mobile_responsive": is_mobile_responsive,
-            "ttfb_ms": ttfb_ms,
-            "dom_load_time_ms": dom_load_time_ms,
-            **stack,
+            partial_html = await page.content()
+        except PlaywrightError:
+            partial_html = None
+        return {
+            "category": "LAGGY_UX",
+            "has_ssl": page.url.startswith("https://"),
+            "is_mobile_responsive": None,
+            "ttfb_ms": None,
+            "dom_load_time_ms": NAV_TIMEOUT_MS,
+            "operational_bottleneck": f"Site did not finish loading within {NAV_TIMEOUT_MS // 1000}s",
+            **detect_stack(partial_html),
         }
+    except PlaywrightError as exc:
+        reason = describe_unreachable(str(exc))
+        if reason is None:
+            raise
+        # A listed website that doesn't resolve is as good as no website
+        return {
+            "category": "DIGITAL_GHOST",
+            "has_ssl": False,
+            "is_mobile_responsive": False,
+            "ttfb_ms": 0,
+            "dom_load_time_ms": 0,
+            "operational_bottleneck": reason,
+        }
+    elapsed_ms = (time.monotonic() - started) * 1000
 
-        if category == "AUTOMATION_CANDIDATE":
-            findings = query_ollama(await page.inner_text("body"))
-            # Markup evidence wins; the LLM can only add what the HTML missed
-            result["has_chat_widget"] = stack["has_chat_widget"] or findings["has_chat_widget"]
-            result["has_online_booking"] = stack["has_online_booking"] or findings["has_online_booking"]
-            result["operational_bottleneck"] = findings["operational_bottleneck"]
+    # Judge HTTPS on where we landed: many listings say http:// but redirect
+    has_ssl = page.url.startswith("https://")
 
-        return result
-    finally:
-        if launched:
-            await camoufox.__aexit__(None, None, None)
+    # Navigation timing is occasionally missing or zeroed by SPA routers;
+    # fall back to wall-clock time rather than scoring the site as instant.
+    metrics = await page.evaluate(_PERFORMANCE_JS) or {}
+    ttfb_ms = metrics.get("ttfb_ms") or 0.0
+    dom_load_time_ms = metrics.get("dom_load_time_ms") or elapsed_ms
+
+    is_mobile_responsive = await page.locator("meta[name='viewport']").count() > 0
+    stack = detect_stack(await page.content())
+
+    category = classify_site(has_ssl, is_mobile_responsive, ttfb_ms, dom_load_time_ms)
+    result = {
+        "category": category,
+        "has_ssl": has_ssl,
+        "is_mobile_responsive": is_mobile_responsive,
+        "ttfb_ms": ttfb_ms,
+        "dom_load_time_ms": dom_load_time_ms,
+        **stack,
+    }
+
+    if category == "AUTOMATION_CANDIDATE":
+        findings = query_ollama(await page.inner_text("body"))
+        # Markup evidence wins; the LLM can only add what the HTML missed
+        result["has_chat_widget"] = stack["has_chat_widget"] or findings["has_chat_widget"]
+        result["has_online_booking"] = stack["has_online_booking"] or findings["has_online_booking"]
+        result["operational_bottleneck"] = findings["operational_bottleneck"]
+
+    return result
+
+
+class SiteAuditor:
+    """Audits many sites with one shared browser.
+
+    Launching Camoufox takes seconds, so a batch reuses one browser and gives
+    each site a fresh page (its own context, so no cookies leak between
+    sites). The browser starts lazily on the first site, so a batch of
+    website-less leads never launches one, and is relaunched if it dies.
+    Use as a context manager so the browser is always shut down.
+    """
+
+    def __init__(self):
+        self._loop: asyncio.AbstractEventLoop | None = None
+        self._camoufox = None
+        self._browser = None
+
+    def __enter__(self) -> "SiteAuditor":
+        return self
+
+    def __exit__(self, *exc_info) -> None:
+        self.close()
+
+    def audit(self, website_url: str | None) -> dict:
+        """Audit a lead's website and categorize it for outreach prioritization."""
+        if not website_url:
+            return {"category": "DIGITAL_GHOST"}
+        if self._loop is None:
+            self._loop = asyncio.new_event_loop()
+        return self._loop.run_until_complete(self._audit(website_url))
+
+    def close(self) -> None:
+        if self._loop is None:
+            return
+        self._loop.run_until_complete(self._close_browser())
+        self._loop.close()
+        self._loop = None
+
+    async def _audit(self, website_url: str) -> dict:
+        browser = await self._ensure_browser()
+        page = await browser.new_page()
+        try:
+            return await _audit_page(page, website_url)
+        finally:
+            try:
+                await page.close()
+            except PlaywrightError:
+                pass
+
+    async def _ensure_browser(self):
+        if self._browser is None or not self._browser.is_connected():
+            await self._close_browser()
+            self._camoufox = AsyncCamoufox(
+                headless=camoufox_headless_mode(), geoip=True, humanize=True, os=["windows"]
+            )
+            self._browser = await self._camoufox.__aenter__()
+        return self._browser
+
+    async def _close_browser(self) -> None:
+        if self._camoufox is not None:
+            try:
+                await self._camoufox.__aexit__(None, None, None)
+            except Exception:
+                pass  # already dead; nothing left to clean up
+        self._camoufox = None
+        self._browser = None
 
 
 def audit_lead(website_url: str | None) -> dict:
-    """Audit a lead's website and categorize it for outreach prioritization."""
-    if not website_url:
-        return {"category": "DIGITAL_GHOST"}
-
-    return asyncio.run(_audit_lead_async(website_url))
+    """One-off audit; batches should share a SiteAuditor instead."""
+    with SiteAuditor() as auditor:
+        return auditor.audit(website_url)
 
 
 if __name__ == "__main__":
