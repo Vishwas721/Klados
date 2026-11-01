@@ -46,15 +46,19 @@ export function buildWhatsAppMessage(lead: Lead): string {
   return `${buildPitchBody(lead)}${DPDP_FOOTER}`;
 }
 
+/** The backend stores landlines with their trunk 0 (e.g. 08041234567). */
+export function isLandline(phone: string | null | undefined): boolean {
+  return !!phone && phone.startsWith("0");
+}
+
 /**
- * Convert a stored Indian number into wa.me's international format (91XXXXXXXXXX).
- * Landlines keep their STD code but drop the trunk 0. Returns null for anything
- * that can't be a valid Indian number.
+ * Convert a stored Indian mobile number into wa.me's format (91XXXXXXXXXX).
+ * Returns null for landlines (no WhatsApp) and anything that isn't 10 digits.
  */
 export function toWhatsAppNumber(phone: string | null | undefined): string | null {
+  if (isLandline(phone)) return null;
   let digits = phone?.replace(/\D/g, "") ?? "";
   if (digits.length === 12 && digits.startsWith("91")) digits = digits.slice(2);
-  if (digits.length === 11 && digits.startsWith("0")) digits = digits.slice(1);
   return digits.length === 10 ? `91${digits}` : null;
 }
 

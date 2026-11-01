@@ -106,15 +106,17 @@ if [ ! -f "$VENV_DIR/bin/activate" ]; then
     "$PYTHON_BIN" -m venv "$VENV_DIR"
     # shellcheck source=/dev/null
     source "$VENV_DIR/bin/activate"
-    echo "       Installing dependencies from requirements.txt..."
     pip install --upgrade pip -q
-    pip install -r "$BACKEND_DIR/requirements.txt" -q
-    echo "       Dependencies installed."
 else
     echo "       Activating existing virtual environment..."
     # shellcheck source=/dev/null
     source "$VENV_DIR/bin/activate"
 fi
+
+# Sync every run so dependencies added to requirements.txt reach an
+# existing venv (a no-op when nothing changed).
+echo "       Syncing dependencies from requirements.txt..."
+pip install -r "$BACKEND_DIR/requirements.txt" -q --disable-pip-version-check
 
 echo "       Python: $(python --version)"
 

@@ -31,6 +31,7 @@ from sqlalchemy.orm import Session
 from app.core.browser import camoufox_headless_mode
 from app.db.models import Lead
 from app.services.discovery.geo_grid import cell_to_coords, generate_city_cells
+from app.services.discovery.phones import normalize_indian_phone
 
 MAPS_SEARCH_URL = "https://www.google.com/maps/search/{query}/@{lat},{lng},15z"
 
@@ -121,8 +122,6 @@ WEBSITE_LINK_SELECTOR = 'a[data-value="Website"]'
 DETAIL_PHONE_SELECTOR = 'button[data-item-id^="phone:tel:"]'
 DETAIL_WEBSITE_SELECTOR = 'a[data-item-id="authority"]'
 
-# Match Indian mobile numbers (starts with 6-9, 10 digits) or landline numbers (STD code + number, 10-11 digits)
-PHONE_REGEX = re.compile(r"^[6-9]\d{9}$|^0[1-9]\d{8,9}$|^[1-9]\d{9}$")
 _RAW_PHONE_CANDIDATE = re.compile(r"(\+?\d[\d\s\-]{7,14}\d)")
 _COORDS_IN_HREF = re.compile(r"!3d(-?\d+\.\d+)!4d(-?\d+\.\d+)")
 
@@ -149,15 +148,7 @@ def _is_valid_website(url: str | None) -> bool:
 
 
 def _normalize_phone(raw: str) -> str | None:
-    digits = re.sub(r"[^\d+]", "", raw)
-    if digits.startswith("+91"):
-        digits = digits[3:]
-    elif digits.startswith("91") and len(digits) == 12:
-        digits = digits[2:]
-    elif digits.startswith("0") and len(digits) == 11 and digits[1] in "6789":
-        # Mobile with leading 0
-        digits = digits[1:]
-    return digits if PHONE_REGEX.fullmatch(digits) else None
+    return normalize_indian_phone(raw)
 
 
 

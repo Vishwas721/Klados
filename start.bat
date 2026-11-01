@@ -48,9 +48,10 @@ if %errorlevel% neq 0 (
 )
 echo PostgreSQL is ready.
 
-:: 3. Run database migrations
-echo [3/5] Running database migrations...
+:: 3. Sync dependencies, then run database migrations
+echo [3/5] Syncing dependencies and running database migrations...
 cd /d "%BACKEND_DIR%"
+"%PYTHON%" -m pip install -r requirements.txt -q --disable-pip-version-check
 "%PYTHON%" -m alembic upgrade head
 if %errorlevel% neq 0 (
     echo WARNING: Alembic migrations encountered an issue. Check output above.
@@ -62,7 +63,7 @@ where wsl >nul 2>&1
 if %errorlevel% equ 0 (
     echo Starting worker in WSLg namespace wrapper...
     for /f "delims=" %%P in ('wsl wslpath -a "%BACKEND_DIR%"') do set "WSL_BACKEND_DIR=%%P"
-    start "Klados Worker" wsl -e bash -c "cd '!WSL_BACKEND_DIR!' && source .venv-linux/bin/activate && chmod +x run_camoufox.sh && ./run_camoufox.sh python -m app.worker"
+    start "Klados Worker" wsl -e bash -c "cd '!WSL_BACKEND_DIR!' && source .venv-linux/bin/activate && pip install -r requirements.txt -q --disable-pip-version-check && chmod +x run_camoufox.sh && ./run_camoufox.sh python -m app.worker"
 ) else (
     echo WSL not detected. Starting native Python worker...
     start "Klados Worker" cmd /k "cd /d "%BACKEND_DIR%" && "%PYTHON%" -m app.worker"

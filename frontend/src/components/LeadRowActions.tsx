@@ -3,7 +3,7 @@
 import { useState } from "react";
 import { MessageCircle, UserX } from "lucide-react";
 import { Lead } from "@/lib/types";
-import { buildWhatsAppLink } from "@/lib/pitch";
+import { buildWhatsAppLink, isLandline } from "@/lib/pitch";
 
 interface LeadRowActionsProps {
   lead: Lead;
@@ -46,7 +46,13 @@ export function LeadRowActions({ lead, onWhatsAppSent, onOptOut }: LeadRowAction
         suppressHydrationWarning
         onClick={handleWhatsApp}
         disabled={!whatsappLink || pending !== null}
-        title={whatsappLink ? undefined : "No phone number on file"}
+        title={
+          whatsappLink
+            ? undefined
+            : isLandline(lead.phone_number)
+              ? "Landline number - call instead"
+              : "No usable mobile number on file"
+        }
         className="inline-flex items-center gap-1.5 rounded-lg bg-emerald-600 px-3 py-1.5 text-xs font-semibold text-white hover:bg-emerald-700 disabled:cursor-not-allowed disabled:opacity-50"
       >
         <MessageCircle className="h-3.5 w-3.5" />

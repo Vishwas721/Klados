@@ -3,6 +3,7 @@ import { CategoryBadge } from "./CategoryBadge";
 import { PerformanceBadges } from "./PerformanceBadges";
 import { TechStackTags } from "./TechStackTags";
 import { LeadRowActions } from "./LeadRowActions";
+import { isLandline } from "@/lib/pitch";
 
 const COLUMNS = ["Business Name", "Phone Number", "Category", "Performance", "Tech Stack", "Actions"];
 
@@ -53,7 +54,18 @@ export function LeadsTable({ leads, onWhatsAppSent, onOptOut }: LeadsTableProps)
                   </a>
                 )}
               </td>
-              <td className="px-4 py-3 text-sm text-gray-600">{lead.phone_number || "—"}</td>
+              <td className="px-4 py-3 text-sm text-gray-600">
+                {lead.phone_number ? (
+                  <a href={`tel:+91${lead.phone_number.replace(/^0/, "")}`} className="hover:underline">
+                    {lead.phone_number}
+                  </a>
+                ) : (
+                  "—"
+                )}
+                {isLandline(lead.phone_number) && (
+                  <span className="ml-1.5 rounded bg-gray-100 px-1.5 py-0.5 text-[11px] text-gray-500">landline</span>
+                )}
+              </td>
               <td className="px-4 py-3">
                 <CategoryBadge category={lead.category} />
               </td>
