@@ -194,7 +194,7 @@ echo "[5/5] Starting FastAPI backend on :8000..."
     source "$VENV_DIR/bin/activate"
     cd "$BACKEND_DIR"
     export PYTHONPATH="$BACKEND_DIR:${PYTHONPATH:-}"
-    uvicorn app.main:app --host 0.0.0.0 --port 8000
+    uvicorn app.main:app --host 127.0.0.1 --port 8000
 ) >"$LOG_DIR/api.log" 2>&1 &
 API_PID=$!
 PIDS+=("$API_PID")
@@ -221,4 +221,4 @@ echo "========================================="
 echo ""
 
 cd "$FRONTEND_DIR"
-npm run dev
+npm run dev -- -H 127.0.0.1

@@ -33,7 +33,7 @@ if %errorlevel% neq 0 (
 )
 
 :: Wait for PostgreSQL to be healthy
-echo Waiting for PostgreSQL to be ready on port 5433...
+echo Waiting for PostgreSQL to be ready...
 set RETRY=0
 :WAIT_POSTGRES
 docker exec klados_postgres pg_isready -U postgres -d leads_db >nul 2>&1
@@ -70,7 +70,7 @@ if %errorlevel% equ 0 (
 
 :: 5. Start FastAPI backend
 echo [5/5] Starting FastAPI backend on port 8000...
-start "Klados API" cmd /k "cd /d "%BACKEND_DIR%" && "%PYTHON%" -m uvicorn app.main:app --host 0.0.0.0 --port 8000"
+start "Klados API" cmd /k "cd /d "%BACKEND_DIR%" && "%PYTHON%" -m uvicorn app.main:app --host 127.0.0.1 --port 8000"
 
 :: 6. Start Next.js frontend
 echo Starting Next.js frontend on port 3000...
@@ -80,6 +80,6 @@ echo   Frontend: http://localhost:3000
 echo   Close windows to terminate services
 echo =========================================
 cd /d "%PROJECT_DIR%\frontend"
-npm run dev
+npm run dev -- -H 127.0.0.1
 
 endlocal

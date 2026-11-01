@@ -59,11 +59,12 @@ worker, the API and the dashboard. Logs go to `logs/`.
 To run everything in containers instead: `./start_radar.sh` (or
 `start_radar.bat`), i.e. `docker compose up --build -d`.
 
-If ports 5433 or 6379 are taken by another project, override them for both
-Docker and the backend:
+Postgres listens on **5434** and Redis on **6380** (chosen to stay clear of
+other local stacks on 5433/6379). Every service binds to `127.0.0.1` only. To
+use other ports, set them for both Docker and the backend:
 
 ```bash
-POSTGRES_PORT=5434 REDIS_PORT=6380 ./start.sh
+POSTGRES_PORT=5544 REDIS_PORT=6390 ./start.sh
 ```
 
 ## Configuration
@@ -73,8 +74,8 @@ variables or `backend/.env`:
 
 | Variable | Default |
 | --- | --- |
-| `POSTGRES_HOST` / `POSTGRES_PORT` / `POSTGRES_DB` | `localhost` / `5433` / `leads_db` |
-| `REDIS_HOST` / `REDIS_PORT` | `localhost` / `6379` |
+| `POSTGRES_HOST` / `POSTGRES_PORT` / `POSTGRES_DB` | `localhost` / `5434` / `leads_db` |
+| `REDIS_HOST` / `REDIS_PORT` | `localhost` / `6380` |
 | `DAILY_LIMIT` | `40` |
 | `MAX_LEADS_PER_CELL` | `20` |
 | `AUDIT_DELAY_MIN_S` / `AUDIT_DELAY_MAX_S` | `3` / `7` |

@@ -9,11 +9,11 @@ class Settings(BaseSettings):
     POSTGRES_USER: str = "postgres"
     POSTGRES_PASSWORD: str = "postgrespassword"
     POSTGRES_HOST: str = "localhost"
-    POSTGRES_PORT: int = 5433
+    POSTGRES_PORT: int = 5434
     POSTGRES_DB: str = "leads_db"
 
     REDIS_HOST: str = "localhost"
-    REDIS_PORT: int = 6379
+    REDIS_PORT: int = 6380
 
     # JSON list when set via env, e.g. CORS_ORIGINS='["http://localhost:3000"]'
     CORS_ORIGINS: list[str] = ["http://localhost:3000", "http://127.0.0.1:3000"]
