@@ -1,96 +1,117 @@
 # Klados Architectural Audit & System State
 
-This file documents the exact hardcoded values, rules, and logic currently implemented in the Klados codebase (`backend/`, `frontend/`, and root scripts) as of the current state.
+This file documents the exact hardcoded values, rules, and logic currently implemented in the Klados codebase (`backend/`, `frontend/`, and root scripts). Limits marked *(env)* are read from `backend/app/core/config.py` settings.
 
 ## 1. Scraping Velocities & Anti-Ban Safeguards
 
 *   **Sleep Intervals & Delays**:
     *   **Google Maps Extraction**: During missing detail enrichment, human pacing is mimicked by pausing randomly between **3.0s and 7.0s** before navigating to individual place URLs. When scrolling the feed, it pauses exactly **1200ms** per page down.
-    *   **Auditing Delay**: The worker paces individual audits within a batch by sleeping randomly between `AUDIT_DELAY_MIN_S` (**3s**) and `AUDIT_DELAY_MAX_S` (**7s**).
+    *   **Auditing Delay**: The worker paces individual audits within a batch by sleeping randomly between `AUDIT_DELAY_MIN_S` (**3s**) and `AUDIT_DELAY_MAX_S` (**7s**) *(env)*.
 *   **Camoufox Parameters & Headers**:
-    *   **Google Maps Crawler**: Instantiates `AsyncCamoufox(headless=camoufox_headless_mode(), geoip=True, locale="en-IN")`.
-    *   **Site Auditor**: Uses stronger humanization: `AsyncCamoufox(headless=..., geoip=True, humanize=True, os=["windows"])`.
+    *   **Google Maps Crawler**: Instantiates `AsyncCamoufox(headless=camoufox_headless_mode(), geoip=True, locale="en-IN")`, retrying the launch up to 3 times.
+    *   **Site Auditor**: Uses stronger humanization: `AsyncCamoufox(headless=..., geoip=True, humanize=True, os=["windows"])`. One browser is launched per audited site.
 *   **WSLg X11 Namespace Workaround**:
     *   Because WSLg mounts `/tmp/.X11-unix` as a read-only `tmpfs`, `Xvfb` (which Camoufox relies on) cannot create its socket file.
     *   `run_camoufox.sh` intercepts execution and runs `unshare --user --map-root-user --mount`. Inside this isolated mount namespace, it creates a private writable directory in `$XDG_RUNTIME_DIR` and bind-mounts it over `/tmp/.X11-unix` so `Xvfb` functions normally natively within Linux. The worker is invoked as `./run_camoufox.sh python -m app.worker`.
 
 ## 2. Quotas & Limits
 
-*   **Daily Global Limit**: `DAILY_LIMIT = 50` (configurable via env var).
+*   **Daily Global Limit**: `DAILY_LIMIT = 40` *(env)*.
 *   **Per-Cell & Search Limits**:
-    *   Maximum **20 leads** per H3 cell (`MAX_LEADS_PER_CELL = 20`).
+    *   Maximum **20 leads** per H3 cell (`MAX_LEADS_PER_CELL = 20`) *(env)*.
     *   Manual scan triggers are strictly capped at maximum **6 H3 cells**.
+    *   RQ job timeout: **3600 s** per cell.
 *   **Redis Key Management & Reset**:
-    *   **Worker Tracker**: `leads_collected_today` tracks daily global scrapes. It is reset at **midnight UTC** via an absolute TTL calculation.
+    *   **Worker Tracker**: `leads_collected_today` tracks daily global scrapes. It is reset at **midnight UTC** via an absolute TTL calculation. If Redis can't be read, the worker **fails closed** and treats the limit as reached.
+    *   **Coverage**: `seen_cells:{city}:{niche}` sets (lowercased) record scanned cells; every write refreshes a **30-day TTL** (`SEEN_CELLS_TTL_S`).
     *   **Locking**: The API maintains a **24-hour rolling lock** per `(niche, city)` pair in the PostgreSQL `SearchHistory` table.
 *   **Limit Reached Behavior**:
-    *   **API Response**: Returns `429 Too Many Requests` with a `Retry-After` header and exception string: `"Daily limit reached for '{query}' in '{city}'. Locked until {unlock_time}... Check back tomorrow."`.
-    *   **Worker Behavior**: If `daily_count >= DAILY_LIMIT` is hit during a batch, the worker logs a warning, halts processing mid-batch, and returns status `"daily_limit_reached"`.
-    *   **Frontend UI Guard**: `ScanTrigger.tsx` catches the `429` error, displays an error message, and disables inputs and buttons (`disabled={loading}`) during submission.
+    *   **API Response**: Returns `429 Too Many Requests` with a `Retry-After` header and exception string: `"Daily limit reached for '{query}' in '{city}'. Locked until {unlock_time}... Check back tomorrow."`. The dashboard shows this message verbatim.
+    *   **Worker Behavior**: If `daily_count >= DAILY_LIMIT` before or during a cell, the worker stops, returns status `"daily_limit_reached"`, **removes the cell from the seen set** so a later run redoes it, and **does not expand** into neighbours.
 
 ## 3. Search, Grid & Geographic Coverage
 
-*   **Geographic Indexing**: Uses **H3 resolution level 9**.
-*   **Coverage Priorities & Bounding Boxes**:
-    *   **Priority 1 (Karnataka - 12 zones)**: `bengaluru_central`, `bengaluru_south`, `bengaluru_east`, `bengaluru_north`, `mysuru`, `mangaluru`, `hubballi_dharwad`, `belagavi`, `shivamogga`, `davanagere`, `tumakuru`, `udupi_manipal`.
+*   **Geographic Indexing**: Uses **H3 resolution level 9** (~0.1 km² per cell; Bengaluru's box is ~7,800 cells).
+*   **Cell Order**: `generate_city_cells()` returns cells sorted by grid distance from the bounding-box centre (ties broken by cell ID), so scans start where business density is highest.
+*   **City Names**: Normalized by `normalize_city_key()`: `"Bengaluru Central"`, `"bengaluru-central"` and `"bengaluru_central"` are the same key.
+*   **Coverage Priorities & Bounding Boxes** (`targets.py`):
+    *   **Priority 1 (Karnataka - 12 zones)**: `bengaluru_central`, `bengaluru_south`, `bengaluru_east`, `bengaluru_north`, `mysuru`, `mangaluru`, `hubballi_dharwad`, `belagavi`, `shivamogga`, `davanagere`, `tumakuru`, `udupi_manipal`. Plus a whole-city `bengaluru` box.
     *   **Priority 2 (National Hubs - 7 cities)**: `hyderabad`, `pune`, `chennai`, `mumbai`, `ahmedabad`, `coimbatore`, `kochi`.
-*   **Niche Categories**: **131 distinct supported keywords** spanning Fitness, Retail, Personal Care, Home & Decor, Healthcare, Automotive, and Events.
-*   **Selection Mechanism**: Targets are selected using a strict sequential `itertools.cycle` cartesian product of the cities and niches, prioritizing Karnataka first. A `"random"` sampling mode is also available.
-*   **Auto-Expansion / Spillover**: If a cell yields **< 10 leads**, the worker initiates "Smart Spatial Expansion". It resolves immediate neighbors via `h3.k_ring(hex_id, k=1)` (or `grid_disk`), filters out previously visited cells via the Redis `seen_cells:{city}:{query}` cache, and enqueues up to **2 unvisited adjacent cells** for scraping, stopping at `MAX_EXPANSION_DEPTH = 2`.
+    *   Exposed to the dashboard through `GET /api/targets`.
+*   **Niche Categories**: **108 keywords** (`BUSINESS_NICHES`) spanning Fitness, Retail, Personal Care, Home & Decor, Healthcare, Automotive, and Events. Free-text niches are also accepted.
+*   **Manual Scan Selection**: `POST /api/scrape/trigger` takes the **next 6 not-yet-scanned cells** (centre-out) for the niche/city, marks them seen, and queues one job each. If none remain it returns **409**.
+*   **Auto-Expansion / Spillover**: If a cell yields **< 10 new leads** (`EXPANSION_THRESHOLD`), the worker takes its immediate ring (`h3.grid_ring(hex_id, 1)`), keeps neighbours that are inside the city grid and not yet seen, and enqueues up to **2** of them, stopping at `MAX_EXPANSION_DEPTH = 2`.
+*   **Exhaustion & Macro Expansion**: Only when **every cell of the city grid** has been seen for the niche does the worker set `CampaignTracker.is_exhausted`, then (if daily budget remains) jump to a random non-exhausted `(city, niche)` target and queue its first 6 unseen cells.
 
 ## 4. Data Pipeline & Deduplication Logic
 
 *   **Pre-Flight Deduplication SQL**: Before auditing, the worker issues a `SELECT id FROM leads` check. A lead is considered duplicate if:
     *   The `place_id` strictly matches.
-    *   The `phone_number` strictly matches.
+    *   The stored phone, stripped of spaces, dashes and `+91`, **ends with the same last 10 digits**.
     *   The `business_name` (lowercased) AND `city` (lowercased) match.
-*   **Post-Flight Deduplication**: Database insertion utilizes PostgreSQL `ON CONFLICT DO NOTHING`. It relies on a unique index for `place_id` and a unique constraint `uq_leads_phone_business` for `(phone_number, business_name)`.
+*   **Post-Flight Deduplication**: Insertion uses an **untargeted** PostgreSQL `ON CONFLICT DO NOTHING`, so a clash on either the unique `place_id` index or `uq_leads_phone_business` `(phone_number, business_name)` is skipped.
+*   **Phone Normalization**: `+91`/`91` prefixes and a leading `0` before a 6-9 digit are stripped to a 10-digit mobile; landlines keep their STD `0`. Toll-free (`1800…`) and other numbers that don't match are dropped, and leads without a phone are not saved.
+*   **Search History**: Updated after **every** cell (status `COMPLETED`, leads added), so runs that find nothing don't stay `RUNNING`.
 *   **PostgreSQL Schema Specs**:
     *   Primary `leads` table includes standard identification columns + technical flags (`latitude`, `longitude`, `ttfb_ms`, `dom_load_time_ms`, `detected_tech`, `llm_audit_summary`, `lacks_chat_widget`, `lacks_booking_flow`).
     *   **Custom Enums**:
         *   `lead_category`: `"DIGITAL_GHOST"`, `"DIGITAL_DINOSAUR"`, `"LAGGY_UX"`, `"AUTOMATION_CANDIDATE"`.
         *   `outreach_status`: `"PENDING"`, `"AUDITED"`, `"CONTACTED_WHATSAPP"`, `"CONTACTED_EMAIL"`, `"RESPONDED"`, `"CONVERTED"`, `"OPTED_OUT"`.
+    *   `campaign_tracker`: `(city, niche)` unique, `is_exhausted`, `last_scraped_at`.
 *   **DPDP Act Compliance Fields**:
     *   `origin_source_url`: Captures the exact Maps search string (Text).
     *   `extraction_timestamp`: Timestamped via database `func.now()`.
-    *   `opted_out`: Boolean flag default `False`.
+    *   `opted_out`: Boolean flag default `False`. Opted-out leads stay in the table so dedup never re-collects them.
 
 ## 5. Lead Auditing & Classification Rules
 
-Buckets are assigned in a strict fallback chain based on the following precise thresholds:
+Buckets are assigned in a strict fallback chain (`classify_site()` in `site_auditor.py`):
 
-1.  **DIGITAL_GHOST**: The business has no website (`website_url` is None).
+1.  **DIGITAL_GHOST**: The business has no website (`website_url` is None), **or** navigation fails with a DNS / connection / TLS error (`NS_ERROR_UNKNOWN_HOST`, `NS_ERROR_CONNECTION_REFUSED`, `SSL_ERROR`…). `llm_audit_summary` then reads e.g. `"Website unreachable (NS_ERROR_UNKNOWN_HOST)"`.
 2.  **DIGITAL_DINOSAUR**:
-    *   Missing SSL (`has_ssl=False`, URL does not begin with `https://`).
+    *   Missing SSL: the **final URL after redirects** does not begin with `https://`.
     *   OR lacks mobile responsiveness (missing `<meta name='viewport'>` tag in DOM).
 3.  **LAGGY_UX**:
-    *   Page navigation strictly fails or times out after **15000 ms** (`NAV_TIMEOUT_MS`).
+    *   Page navigation times out after **15000 ms** (`NAV_TIMEOUT_MS`).
     *   OR DOM Content Loaded (`dom_load_time_ms`) > **4500 ms**.
     *   OR Time to First Byte (`ttfb_ms`) > **1800 ms**.
+    *   If the Navigation Timing entry is missing, load time falls back to wall-clock time around `page.goto`.
 4.  **AUTOMATION_CANDIDATE**: Passes all above conditions.
-    *   **Ollama Integration**: Passes body text to local Ollama via HTTP POST (`http://localhost:11434/api/generate`).
-    *   **Model**: `llama3:8b`.
-    *   **Prompt**: "You are auditing a small business's website to find operational gaps that automation could fix..."
-    *   **Fallback Handling**: If Ollama timeouts (30s limit), connection refuses, or returns bad JSON, the script swallows the error to prevent crash and returns `{has_online_booking: False, has_chat_widget: False, operational_bottleneck: "unknown"}`.
+
+*   **Tech, Chat & Booking Detection** (`tech_detector.py`): For every site that loads (and timed-out pages' partial HTML), the HTML is matched against signatures: platforms/libraries (WordPress, Wix, Shopify, GoDaddy Builder, Webflow, Next.js, Google Analytics, Meta Pixel…), chat widgets (Tawk.to, Intercom, Crisp, Freshchat, Interakt, WATI, WhatsApp links…) and booking embeds (Practo, Calendly, Zoho Bookings, Setmore, Fresha…). Matches fill `detected_tech`; any chat/booking match sets `lacks_chat_widget` / `lacks_booking_flow` to `False`.
+*   **Ollama Integration** (AUTOMATION_CANDIDATE only): Passes the first 2000 chars of body text to `OLLAMA_URL` *(env, default `http://localhost:11434/api/generate`)* with `OLLAMA_MODEL` *(env, default `llama3:8b`)*. Its `operational_bottleneck` becomes `llm_audit_summary`; its booking/chat answers can only add to what the HTML showed.
+    *   **Fallback Handling**: If Ollama times out (30s), refuses the connection, or returns bad JSON, the error is swallowed and `{has_online_booking: False, has_chat_widget: False, operational_bottleneck: "unknown"}` is used.
+*   **Worker Fallback**: Any other audit exception saves the lead as `DIGITAL_GHOST` (no website) or `LAGGY_UX` with `"Audit failed: <first line of error>"`. RQ's `JobTimeoutException` is re-raised, not treated as an audit failure.
 
 ## 6. Environment & Startup Orchestration
 
+*   **Single `docker-compose.yml`** at the repo root (project name `klados`): `postgres`, `redis`, `api`, `worker`, `frontend`. Containers are named `klados_*`. Volumes are pinned to `backend_postgres_data` / `backend_redis_data`, the names from the old `lead-radar/backend` layout, so existing data carries over. Host ports default to **5433** / **6379** and can be overridden with `POSTGRES_PORT` / `REDIS_PORT`.
 *   **`start.sh` Orchestration**:
     *   **WSL Bounce**: Detects if executed in Git Bash (MINGW64/CYGWIN) and actively bounces the script to execute natively via `wsl -e bash "$WSL_PATH/start.sh"`.
-    *   **Docker Dependency**: Brings up PostgreSQL and Redis via `docker compose up -d`.
+    *   **Docker Dependency**: Brings up only PostgreSQL and Redis via `docker compose up -d postgres redis`.
+    *   **Migrations**: `alembic upgrade head` before starting services. The Docker `api` image does the same on boot.
     *   **Backgrounding**: Uses Linux standard backgrounding `&` and redirect (`> logs/worker.log 2>&1 &`) to run `uvicorn` and `app.worker` simultaneously.
     *   **Foreground**: Keeps the Next.js `npm run dev` running in the terminal foreground.
     *   **Termination Trap**: Maps a `trap cleanup SIGINT SIGTERM EXIT` function to cleanly kill captured background PIDs (`kill "$pid"`) and stop docker containers upon `Ctrl+C`.
+*   **`start.bat`**: Same steps in separate windows; resolves its WSL path with `wslpath` and runs Python tools as `python -m …` using `backend/.venv-windows` when present.
+*   **API Endpoints**: `GET /api/leads` (validated `category`/`status`, limit ≤ 1000), `GET /api/leads/stats`, `PATCH /api/leads/:id/status`, `POST /api/leads/:id/opt-out`, `POST /api/scrape/trigger`, `GET /api/search-history`, `GET /api/campaigns/exhausted`, `GET /api/targets`, `GET /health`. The API enqueues `app.worker.process_h3_cell` by dotted path and never imports the browser stack.
 *   **Frontend Integration**:
-    *   **Endpoints Consumed**: `GET /api/leads`, `PATCH /api/leads/:id/status`, `POST /api/leads/:id/opt-out`, `POST /api/scrape/trigger`, `GET /api/search-history`.
-    *   **WhatsApp Linking**: Formats wa.me links with hardcoded country code: `https://wa.me/91${cleanPhone}?text=${encodedMessage}`.
-    *   **Templates**: Tailored pitch paragraphs for Ghost, Dinosaur, Laggy UX, and Automation Candidates.
+    *   **API base URL**: `NEXT_PUBLIC_API_BASE_URL`, default `http://localhost:8000`.
+    *   **Counts**: Metric cards and filter tabs use `/api/leads/stats`; the table loads the latest 500 leads.
+    *   **WhatsApp Linking**: `toWhatsAppNumber()` strips non-digits, an existing `91` and a trunk `0`, then requires 10 digits and prefixes `91`: `https://wa.me/91XXXXXXXXXX?text=...`.
+    *   **Templates**: Tailored pitch paragraphs for Ghost (separate copy for an unreachable website), Dinosaur (names the missing HTTPS vs mobile support), Laggy UX (load time in seconds), and Automation Candidates (names the missing booking and/or chat), using the lead's own city.
     *   **Opt-out footer**: `\n\nSource: Public Google Maps listing. Reply STOP to opt out.`
 
 ## 7. Known Technical Debt & Fragile Points
 
-1.  **Redis Memory Leak (Unbounded Set Growth)**: The `seen_cells:{city}:{query}` Redis sets (used to track visited cells during smart expansion and prevent loops) do not have a TTL configured (`r.expire()`). They will persist permanently and slowly leak Redis memory.
-2.  **Swallowed Exception in Redis Counter**: In `increment_leads_collected_today`, if Redis fails or disconnects, the exception is caught and the function returns `0`. This breaks the daily limit guard, meaning the worker could scrape infinitely if Redis goes offline midway.
-3.  **Hardcoded WhatsApp Prefix**: The frontend hardcodes the `91` India country code into WhatsApp deep links (`wa.me/91...`). If geographic priority expands globally, outreach links will break for non-Indian phone numbers.
-4.  **Incomplete Pre-Flight Deduplication**: `is_duplicate_lead` strict-matches `phone_number` directly against the database text. It misses scenarios where formats differ slightly (e.g., missing spaces or standardizing prefixes), causing redundant audits.
-5.  **JS Navigation Timing Vulnerability**: `site_auditor.py` extracts performance using `metrics = await page.evaluate(...) or {}`. If a site's framework aggressively rewrites performance timeline logs, `ttfb_ms` defaults to `0.0`, resulting in a false-positive healthy performance score.
+Resolved from the previous audit: `seen_cells` sets now always get a TTL; the daily counter fails closed; phone dedup tolerates formatting differences; missing navigation timing falls back to wall-clock time; WhatsApp numbers are normalized before the `91` prefix is added (still India-only by design).
+
+Still open:
+
+1.  **One browser launch per audit**: Each website audit starts and tears down a fresh Camoufox instance (several seconds each). Reusing one browser per cell would speed batches up considerably.
+2.  **Blocked Maps looks like an empty cell**: When Google serves a CAPTCHA/consent page, `extract_places` returns `[]` (with a debug dump in `logs/gmaps_debug/`), and the cell is still marked seen.
+3.  **Ambiguous `0` prefixes**: `080XXXXXXXX` (Bengaluru landline) matches the "mobile with leading 0" rule and is stored as `80XXXXXXXX`. Harmless for dedup, but its WhatsApp link will point at a non-WhatsApp number.
+4.  **Chains collapse into one lead**: Dedup on `(business_name, city)` and on shared phone numbers keeps only the first branch of a chain.
+5.  **Lock keys are literal strings**: `"Gyms"` and `"gym"` are separate locks, coverage sets and history rows.
+6.  **Exhaustion is permanent**: `CampaignTracker.is_exhausted` is never cleared, though the underlying seen-cell set expires after 30 days.
+7.  **No API authentication**: The API is meant for localhost only; CORS is restricted but endpoints are open to anything that can reach port 8000.
