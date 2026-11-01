@@ -12,6 +12,7 @@ class FakeRedis:
     def __init__(self):
         self.sets: dict[str, set[str]] = {}
         self.ttls: dict[str, int] = {}
+        self.values: dict[str, bytes] = {}
 
     def sadd(self, key, *members):
         self.sets.setdefault(key, set()).update(members)
@@ -24,6 +25,14 @@ class FakeRedis:
 
     def expire(self, key, seconds):
         self.ttls[key] = seconds
+
+    def get(self, key):
+        return self.values.get(key)
+
+    def set(self, key, value, ex=None):
+        self.values[key] = value.encode() if isinstance(value, str) else value
+        if ex:
+            self.ttls[key] = ex
 
 
 @pytest.fixture

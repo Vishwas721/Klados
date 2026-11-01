@@ -25,6 +25,8 @@ class Settings(BaseSettings):
     AUDIT_DELAY_MIN_S: int = 3
     AUDIT_DELAY_MAX_S: int = 7
     DAILY_LIMIT: int = 40
+    # Pause all Maps scraping this long after Google serves a CAPTCHA/consent wall
+    MAPS_BLOCK_COOLDOWN_S: int = 3600
 
     OLLAMA_URL: str = "http://localhost:11434/api/generate"
     OLLAMA_MODEL: str = "llama3:8b"

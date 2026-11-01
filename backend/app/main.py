@@ -13,7 +13,7 @@ from sqlalchemy.orm import Session
 from app.core.config import settings
 from app.db.models import CampaignTracker, Lead, SearchHistory
 from app.db.session import get_db
-from app.services.discovery.coverage import mark_seen, unseen_cells
+from app.services.discovery.coverage import MAPS_BLOCKED_KEY, mark_seen, unseen_cells
 from app.services.discovery.targets import BUSINESS_NICHES, CITY_BOUNDING_BOXES
 
 app = FastAPI(title=settings.PROJECT_NAME)
@@ -159,7 +159,19 @@ def trigger_scrape(payload: ScrapeTriggerRequest, db: Session = Depends(get_db))
             headers={"Retry-After": str(remaining_s)},
         )
 
-    # 2. Pick the next not-yet-scanned cells, nearest the city centre first,
+    # 2. Don't queue work while Google is blocking Maps searches
+    blocked_ttl = redis_conn.ttl(MAPS_BLOCKED_KEY)
+    if blocked_ttl and blocked_ttl > 0:
+        raise HTTPException(
+            status_code=503,
+            detail=(
+                "Google is temporarily blocking Maps searches. Scanning is paused for "
+                f"another {max(1, blocked_ttl // 60)} min to protect the IP."
+            ),
+            headers={"Retry-After": str(blocked_ttl)},
+        )
+
+    # 3. Pick the next not-yet-scanned cells, nearest the city centre first,
     # so each run covers new ground instead of re-scraping the same cells.
     try:
         candidates = unseen_cells(redis_conn, payload.city, payload.query)
@@ -178,7 +190,7 @@ def trigger_scrape(payload: ScrapeTriggerRequest, db: Session = Depends(get_db))
     selected_cells = candidates[: payload.max_cells]
     mark_seen(redis_conn, payload.city, payload.query, selected_cells)
 
-    # 3. Update or create SearchHistory lock
+    # 4. Update or create SearchHistory lock
     if history is None:
         history = SearchHistory(
             niche=payload.query.strip(),
@@ -192,7 +204,7 @@ def trigger_scrape(payload: ScrapeTriggerRequest, db: Session = Depends(get_db))
         history.last_run_at = datetime.now(timezone.utc)
     db.commit()
 
-    # 4. Enqueue initial H3 cells to RQ
+    # 5. Enqueue initial H3 cells to RQ
     jobs = [
         task_queue.enqueue(
             PROCESS_CELL_TASK, args=(hex_id, payload.query, payload.city, 0), job_timeout=JOB_TIMEOUT_S

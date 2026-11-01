@@ -52,7 +52,9 @@ def stubbed(monkeypatch, fake_redis):
     monkeypatch.setattr(worker, "SiteAuditor", FakeAuditor)
     monkeypatch.setattr(worker.time, "sleep", lambda s: None)
     monkeypatch.setattr(
-        worker, "_update_search_history", lambda db, q, c, n: calls["history"].append(n)
+        worker,
+        "_update_search_history",
+        lambda db, q, c, n, status="COMPLETED": calls["history"].append(n if status == "COMPLETED" else status),
     )
     monkeypatch.setattr(worker, "_handle_exhaustion", lambda q, c: calls.__setitem__("exhausted", calls["exhausted"] + 1))
 
@@ -154,3 +156,34 @@ def test_auditor_closed_even_when_cell_errors(monkeypatch, stubbed):
     with pytest.raises(RuntimeError):
         worker.process_h3_cell(generate_city_cells("Mysuru")[0], "Gyms", "Mysuru")
     assert FakeAuditor.closed == 1
+
+
+def test_maps_block_releases_cell_and_starts_cooldown(monkeypatch, stubbed):
+    fake_redis, _, calls = stubbed
+
+    def blocked(*a, **k):
+        raise worker.MapsBlockedError("Google bot check / CAPTCHA")
+
+    monkeypatch.setattr(worker, "extract_places", blocked)
+    cell = generate_city_cells("Mysuru")[0]
+    mark_seen(fake_redis, "Mysuru", "Gyms", [cell])
+
+    result = worker.process_h3_cell(cell, "Gyms", "Mysuru")
+
+    assert result["status"] == "maps_blocked"
+    assert cell in unseen_cells(fake_redis, "Mysuru", "Gyms")
+    assert fake_redis.ttls[worker.REDIS_MAPS_BLOCKED_KEY] == worker.settings.MAPS_BLOCK_COOLDOWN_S
+    assert calls["history"] == ["BLOCKED"]
+    assert FakeQueue.jobs == []
+
+
+def test_jobs_skip_maps_during_cooldown(monkeypatch, stubbed):
+    fake_redis, _, _ = stubbed
+    fake_redis.set(worker.REDIS_MAPS_BLOCKED_KEY, "Google bot check / CAPTCHA", ex=60)
+
+    def must_not_scrape(*a, **k):
+        raise AssertionError("scraped during cooldown")
+
+    monkeypatch.setattr(worker, "extract_places", must_not_scrape)
+    result = worker.process_h3_cell(generate_city_cells("Mysuru")[0], "Gyms", "Mysuru")
+    assert result["status"] == "maps_blocked"

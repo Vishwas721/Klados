@@ -22,9 +22,9 @@ from app.core.config import settings
 from app.db.models import CampaignTracker, Lead, SearchHistory
 from app.db.session import SessionLocal
 from app.services.auditor.site_auditor import SiteAuditor
-from app.services.discovery.coverage import mark_seen, unmark_seen, unseen_cells
+from app.services.discovery.coverage import MAPS_BLOCKED_KEY, mark_seen, unmark_seen, unseen_cells
 from app.services.discovery.geo_grid import cell_to_coords
-from app.services.discovery.gmaps_extractor import extract_places, is_duplicate_lead
+from app.services.discovery.gmaps_extractor import MapsBlockedError, extract_places, is_duplicate_lead
 from app.services.discovery.targets import get_next_search_target
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s [%(levelname)s] %(name)s: %(message)s")
@@ -40,6 +40,9 @@ AUDIT_DELAY_MAX_S = settings.AUDIT_DELAY_MAX_S
 # Daily collection limit tracked via Redis
 DAILY_LIMIT = settings.DAILY_LIMIT
 REDIS_DAILY_COUNTER_KEY = "leads_collected_today"
+
+# Set while Google is blocking us; every job backs off until it expires
+REDIS_MAPS_BLOCKED_KEY = MAPS_BLOCKED_KEY
 
 # A cell yielding fewer new leads than this spills over into its neighbours
 EXPANSION_THRESHOLD = 10
@@ -82,6 +85,25 @@ def increment_leads_collected_today(r: Redis = redis_conn) -> int:
     return count
 
 
+def _maps_blocked_reason(r: Redis = redis_conn) -> str | None:
+    try:
+        val = r.get(REDIS_MAPS_BLOCKED_KEY)
+    except Exception:
+        return None
+    return val.decode() if isinstance(val, bytes) else val
+
+
+def _back_off_blocked_cell(hex_id: str, query: str, city: str, reason: str) -> dict:
+    """Release the cell for a later run and record the run as blocked."""
+    unmark_seen(redis_conn, city, query, hex_id)
+    db = SessionLocal()
+    try:
+        _update_search_history(db, query, city, 0, status="BLOCKED")
+    finally:
+        db.close()
+    return {"hex_id": hex_id, "query": query, "leads_processed": 0, "status": "maps_blocked", "reason": reason}
+
+
 def get_neighboring_cells(hex_id: str, k: int = 1) -> set[str]:
     """Return the cells exactly k steps away from hex_id."""
     return set(h3.grid_ring(hex_id, k))
@@ -122,7 +144,9 @@ def _insert_lead_on_conflict_do_nothing(
     return db.execute(stmt).scalar_one_or_none()
 
 
-def _update_search_history(db: Session, niche: str, city: str, leads_added: int) -> None:
+def _update_search_history(
+    db: Session, niche: str, city: str, leads_added: int, status: str = "COMPLETED"
+) -> None:
     """Update or initialize search_history entry in PostgreSQL."""
     try:
         norm_niche = niche.strip().lower()
@@ -139,13 +163,13 @@ def _update_search_history(db: Session, niche: str, city: str, leads_added: int)
                 niche=niche.strip(),
                 city=city.strip(),
                 leads_count=leads_added,
-                status="COMPLETED",
+                status=status,
             )
             db.add(rec)
         else:
             rec.leads_count += leads_added
             rec.last_run_at = datetime.now(timezone.utc)
-            rec.status = "COMPLETED"
+            rec.status = status
         db.commit()
     except Exception as exc:
         db.rollback()
@@ -190,6 +214,13 @@ def process_h3_cell(
             "status": "daily_limit_reached",
         }
 
+    blocked_reason = _maps_blocked_reason(redis_conn)
+    if blocked_reason:
+        logger.warning(
+            "[worker] Maps cooldown active (%s). Releasing cell %s without scraping.", blocked_reason, hex_id
+        )
+        return _back_off_blocked_cell(hex_id, query, city, blocked_reason)
+
     # 2. Extract places from Google Maps (safe IP limit: capped at MAX_LEADS_PER_CELL)
     lat, lng = cell_to_coords(hex_id)
     logger.info("[worker] Cell %s coordinates: lat=%.6f, lng=%.6f. Calling extract_places...", hex_id, lat, lng)
@@ -197,6 +228,14 @@ def process_h3_cell(
         raw_places = extract_places(query, lat, lng, limit=MAX_LEADS_PER_CELL, city=city)
     except JobTimeoutException:
         raise
+    except MapsBlockedError as exc:
+        logger.error(
+            "[worker] Google blocked the Maps search (%s). Pausing all scraping for %ds.",
+            exc,
+            settings.MAPS_BLOCK_COOLDOWN_S,
+        )
+        redis_conn.set(REDIS_MAPS_BLOCKED_KEY, str(exc), ex=settings.MAPS_BLOCK_COOLDOWN_S)
+        return _back_off_blocked_cell(hex_id, query, city, str(exc))
     except Exception as exc:
         logger.error("[worker] extract_places failed for cell %s: %s", hex_id, exc)
         raw_places = []

@@ -12,6 +12,9 @@ from app.services.discovery.geo_grid import generate_city_cells
 # that a fully covered city is eventually rescanned for new businesses.
 SEEN_CELLS_TTL_S = 30 * 24 * 3600
 
+# Set by the worker while Google is blocking Maps searches; holds the reason
+MAPS_BLOCKED_KEY = "maps_blocked"
+
 
 def seen_cells_key(city: str, niche: str) -> str:
     return f"seen_cells:{city.strip().lower()}:{niche.strip().lower()}"

@@ -105,6 +105,13 @@ def is_duplicate_lead(
     return db.execute(stmt).scalar_one_or_none() is not None
 
 
+class MapsBlockedError(RuntimeError):
+    """Google answered with a bot check or consent wall instead of results."""
+
+
+# _diagnose_missing_feed() reasons that mean Google is refusing us
+BLOCKED_REASONS = {"Google consent interstitial", "Google bot check / CAPTCHA"}
+
 FEED_SELECTOR = 'div[role="feed"]'
 CARD_SELECTOR = 'div[role="article"]'
 NAME_LINK_SELECTOR = "a.hfpxzc"
@@ -396,7 +403,9 @@ async def _extract_places_async(
         try:
             await page.wait_for_selector(FEED_SELECTOR, timeout=15000)
         except Exception:
-            await _diagnose_missing_feed(page)
+            reason = await _diagnose_missing_feed(page)
+            if reason in BLOCKED_REASONS:
+                raise MapsBlockedError(reason)
             return []
 
         await _scroll_feed(page, target_count=limit)
