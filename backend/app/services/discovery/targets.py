@@ -260,58 +260,36 @@ CITY_BOUNDING_BOXES: dict[str, list[tuple[float, float]]] = {
     ],
 }
 
-# Add normalized aliases for hyphenated and spaced keys
-_ALIASES = {
-    "bengaluru-central": "bengaluru_central",
-    "bengaluru central": "bengaluru_central",
-    "bengaluru-south": "bengaluru_south",
-    "bengaluru south": "bengaluru_south",
-    "bengaluru-east": "bengaluru_east",
-    "bengaluru east": "bengaluru_east",
-    "bengaluru-north": "bengaluru_north",
-    "bengaluru north": "bengaluru_north",
-    "hubballi-dharwad": "hubballi_dharwad",
-    "hubballi dharwad": "hubballi_dharwad",
-    "udupi-manipal": "udupi_manipal",
-    "udupi manipal": "udupi_manipal",
-}
-for alias, target in _ALIASES.items():
-    CITY_BOUNDING_BOXES[alias] = CITY_BOUNDING_BOXES[target]
+# Scan priority: Karnataka zones first, then national hubs
+KARNATAKA_ZONES: list[str] = [
+    "bengaluru_central",
+    "bengaluru_south",
+    "bengaluru_east",
+    "bengaluru_north",
+    "mysuru",
+    "mangaluru",
+    "hubballi_dharwad",
+    "belagavi",
+    "shivamogga",
+    "davanagere",
+    "tumakuru",
+    "udupi_manipal",
+]
+NATIONAL_CITIES: list[str] = [
+    "hyderabad",
+    "pune",
+    "chennai",
+    "mumbai",
+    "ahmedabad",
+    "coimbatore",
+    "kochi",
+]
+PRIORITIZED_CITIES: list[str] = KARNATAKA_ZONES + NATIONAL_CITIES
+
 
 # Stateful sequential iterator over (city, niche) pairs
 def _create_target_cycle() -> Iterator[tuple[str, str]]:
-    # Primary Karnataka zones prioritized first, then secondary
-    karnataka_cities = [
-        "bengaluru_central",
-        "bengaluru_south",
-        "bengaluru_east",
-        "bengaluru_north",
-        "mysuru",
-        "mangaluru",
-        "hubballi_dharwad",
-        "belagavi",
-        "shivamogga",
-        "davanagere",
-        "tumakuru",
-        "udupi_manipal",
-    ]
-    national_cities = [
-        "hyderabad",
-        "pune",
-        "chennai",
-        "mumbai",
-        "ahmedabad",
-        "coimbatore",
-        "kochi",
-    ]
-    all_ordered_cities = karnataka_cities + national_cities
-
-    pairs = [
-        (city, niche)
-        for city in all_ordered_cities
-        for niche in BUSINESS_NICHES
-    ]
-    return cycle(pairs)
+    return cycle([(city, niche) for city in PRIORITIZED_CITIES for niche in BUSINESS_NICHES])
 
 
 _SEQUENTIAL_ROTATOR = _create_target_cycle()
@@ -328,27 +306,6 @@ def get_next_search_target(mode: str = "sequential") -> tuple[str, str]:
         tuple of (city_name, niche_query)
     """
     if mode == "random":
-        cities = [
-            "bengaluru_central",
-            "bengaluru_south",
-            "bengaluru_east",
-            "bengaluru_north",
-            "mysuru",
-            "mangaluru",
-            "hubballi_dharwad",
-            "belagavi",
-            "shivamogga",
-            "davanagere",
-            "tumakuru",
-            "udupi_manipal",
-            "hyderabad",
-            "pune",
-            "chennai",
-            "mumbai",
-            "ahmedabad",
-            "coimbatore",
-            "kochi",
-        ]
-        return random.choice(cities), random.choice(BUSINESS_NICHES)
+        return random.choice(PRIORITIZED_CITIES), random.choice(BUSINESS_NICHES)
 
     return next(_SEQUENTIAL_ROTATOR)

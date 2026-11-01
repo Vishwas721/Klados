@@ -6,7 +6,6 @@ decoupling the slow discovery/audit/scrape pipeline from request handling.
 
 from datetime import datetime, timedelta, timezone
 import logging
-import os
 import random
 import time
 import uuid
@@ -14,45 +13,61 @@ import uuid
 import h3
 from redis import Redis
 from rq import Queue
+from rq.timeouts import JobTimeoutException
 from sqlalchemy import func, select
 from sqlalchemy.dialects.postgresql import insert as pg_insert
 from sqlalchemy.orm import Session
 
 from app.core.config import settings
-from app.db.models import Lead, SearchHistory
+from app.db.models import CampaignTracker, Lead, SearchHistory
 from app.db.session import SessionLocal
 from app.services.auditor.site_auditor import audit_lead
+from app.services.discovery.coverage import mark_seen, unmark_seen, unseen_cells
 from app.services.discovery.geo_grid import cell_to_coords
 from app.services.discovery.gmaps_extractor import extract_places, is_duplicate_lead
+from app.services.discovery.targets import get_next_search_target
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s [%(levelname)s] %(name)s: %(message)s")
 logger = logging.getLogger(__name__)
 
-QUEUE_NAME = "lead_tasks"
+QUEUE_NAME = settings.QUEUE_NAME
+JOB_TIMEOUT_S = 3600
 
-# Safe IP limits: cap leads per cell to 20, and pace audits with a delay
-MAX_LEADS_PER_CELL = int(os.environ.get("MAX_LEADS_PER_CELL", "20"))
-AUDIT_DELAY_MIN_S = int(os.environ.get("AUDIT_DELAY_MIN_S", "3"))
-AUDIT_DELAY_MAX_S = int(os.environ.get("AUDIT_DELAY_MAX_S", "7"))
+MAX_LEADS_PER_CELL = settings.MAX_LEADS_PER_CELL
+AUDIT_DELAY_MIN_S = settings.AUDIT_DELAY_MIN_S
+AUDIT_DELAY_MAX_S = settings.AUDIT_DELAY_MAX_S
 
 # Daily collection limit tracked via Redis
-DAILY_LIMIT = int(os.environ.get("DAILY_LIMIT", "40"))
+DAILY_LIMIT = settings.DAILY_LIMIT
 REDIS_DAILY_COUNTER_KEY = "leads_collected_today"
 
-# Maximum recursive expansion depth for spatial ring expansion
+# A cell yielding fewer new leads than this spills over into its neighbours
+EXPANSION_THRESHOLD = 10
 MAX_EXPANSION_DEPTH = 2
+MAX_NEIGHBOURS_PER_EXPANSION = 2
+
+# Cells queued when the worker jumps to a fresh (city, niche) target
+MACRO_EXPANSION_CELLS = 6
 
 redis_conn = Redis.from_url(settings.REDIS_URL)
 
 
 def get_leads_collected_today(r: Redis = redis_conn) -> int:
-    """Return count of leads collected today from Redis."""
+    """Return count of leads collected today from Redis.
+
+    Fails closed: if Redis can't be read, report the limit as reached rather
+    than letting the worker scrape without a cap.
+    """
     try:
         val = r.get(REDIS_DAILY_COUNTER_KEY)
         return int(val) if val else 0
     except Exception as exc:
-        logger.warning("[worker] Failed to get '%s' from Redis: %s", REDIS_DAILY_COUNTER_KEY, exc)
-        return 0
+        logger.error(
+            "[worker] Failed to read '%s' from Redis (%s); treating daily limit as reached.",
+            REDIS_DAILY_COUNTER_KEY,
+            exc,
+        )
+        return DAILY_LIMIT
 
 
 def increment_leads_collected_today(r: Redis = redis_conn) -> int:
@@ -63,24 +78,13 @@ def increment_leads_collected_today(r: Redis = redis_conn) -> int:
         tomorrow = (now + timedelta(days=1)).replace(
             hour=0, minute=0, second=0, microsecond=0
         )
-        seconds_left = max(int((tomorrow - now).total_seconds()), 3600)
-        r.expire(REDIS_DAILY_COUNTER_KEY, seconds_left)
+        r.expire(REDIS_DAILY_COUNTER_KEY, max(int((tomorrow - now).total_seconds()), 1))
     return count
 
 
 def get_neighboring_cells(hex_id: str, k: int = 1) -> set[str]:
-    """Return neighboring cells at distance k using h3 k_ring / grid_disk."""
-    if hasattr(h3, "grid_ring"):
-        return set(h3.grid_ring(hex_id, k))
-    elif hasattr(h3, "k_ring"):
-        cells = set(h3.k_ring(hex_id, k))
-        cells.discard(hex_id)
-        return cells
-    elif hasattr(h3, "grid_disk"):
-        cells = set(h3.grid_disk(hex_id, k))
-        cells.discard(hex_id)
-        return cells
-    return set()
+    """Return the cells exactly k steps away from hex_id."""
+    return set(h3.grid_ring(hex_id, k))
 
 
 def _insert_lead_on_conflict_do_nothing(
@@ -88,7 +92,8 @@ def _insert_lead_on_conflict_do_nothing(
 ) -> uuid.UUID | None:
     """Insert lead into PostgreSQL with ON CONFLICT DO NOTHING.
 
-    Uses place_id unique index if available, falling back to uq_leads_phone_business.
+    Untargeted, so a clash on either the place_id index or
+    uq_leads_phone_business is skipped instead of raising.
     Returns the created Lead UUID, or None if the record already existed.
     """
     values = {
@@ -113,23 +118,8 @@ def _insert_lead_on_conflict_do_nothing(
         "status": "AUDITED",
     }
 
-    if place.get("place_id"):
-        stmt = (
-            pg_insert(Lead)
-            .values(**values)
-            .on_conflict_do_nothing(index_elements=["place_id"])
-            .returning(Lead.id)
-        )
-    else:
-        stmt = (
-            pg_insert(Lead)
-            .values(**values)
-            .on_conflict_do_nothing(constraint="uq_leads_phone_business")
-            .returning(Lead.id)
-        )
-
-    res = db.execute(stmt)
-    return res.scalar_one_or_none()
+    stmt = pg_insert(Lead).values(**values).on_conflict_do_nothing().returning(Lead.id)
+    return db.execute(stmt).scalar_one_or_none()
 
 
 def _update_search_history(db: Session, niche: str, city: str, leads_added: int) -> None:
@@ -162,6 +152,17 @@ def _update_search_history(db: Session, niche: str, city: str, leads_added: int)
         logger.warning("[worker] Failed to update search_history for '%s' in '%s': %s", niche, city, exc)
 
 
+def _fallback_audit(website_url: str | None, exc: Exception) -> dict:
+    return {
+        "category": "DIGITAL_GHOST" if not website_url else "LAGGY_UX",
+        "has_ssl": False,
+        "is_mobile_responsive": False,
+        "ttfb_ms": 0,
+        "dom_load_time_ms": 0,
+        "operational_bottleneck": f"Audit failed: {str(exc).splitlines()[0][:200]}",
+    }
+
+
 def process_h3_cell(
     hex_id: str, query: str, city: str = "Bengaluru", expansion_depth: int = 0
 ) -> dict:
@@ -178,7 +179,10 @@ def process_h3_cell(
     current_daily_count = get_leads_collected_today(redis_conn)
     logger.info("[worker] Daily leads collected today: %d / %d (limit)", current_daily_count, DAILY_LIMIT)
     if current_daily_count >= DAILY_LIMIT:
-        logger.warning("[worker] Daily limit of %d reached. Sleeping until next cycle.", DAILY_LIMIT)
+        logger.warning(
+            "[worker] Daily limit of %d reached. Releasing cell %s for a later run.", DAILY_LIMIT, hex_id
+        )
+        unmark_seen(redis_conn, city, query, hex_id)
         return {
             "hex_id": hex_id,
             "query": query,
@@ -186,10 +190,16 @@ def process_h3_cell(
             "status": "daily_limit_reached",
         }
 
-    # 2. Extract places from Google Maps (safe IP limit: capped at MAX_LEADS_PER_CELL=20)
+    # 2. Extract places from Google Maps (safe IP limit: capped at MAX_LEADS_PER_CELL)
     lat, lng = cell_to_coords(hex_id)
     logger.info("[worker] Cell %s coordinates: lat=%.6f, lng=%.6f. Calling extract_places...", hex_id, lat, lng)
-    raw_places = extract_places(query, lat, lng, limit=MAX_LEADS_PER_CELL, city=city)
+    try:
+        raw_places = extract_places(query, lat, lng, limit=MAX_LEADS_PER_CELL, city=city)
+    except JobTimeoutException:
+        raise
+    except Exception as exc:
+        logger.error("[worker] extract_places failed for cell %s: %s", hex_id, exc)
+        raw_places = []
     places = raw_places[:MAX_LEADS_PER_CELL]
     logger.info(
         "[worker] Raw places returned by extract_places: %d (capped to MAX_LEADS_PER_CELL=%d: %d)",
@@ -204,6 +214,7 @@ def process_h3_cell(
     skipped_missing_phone = 0
     skipped_duplicates = 0
     processed = 0
+    hit_daily_limit = False
 
     try:
         for i, place in enumerate(places):
@@ -223,6 +234,7 @@ def process_h3_cell(
                     candidate_idx,
                     len(places),
                 )
+                hit_daily_limit = True
                 break
 
             # Validation check: business_name
@@ -288,44 +300,28 @@ def process_h3_cell(
             try:
                 audit = audit_lead(p_website)
                 logger.info(
-                    "[worker] [Candidate %d/%d] Audit completed for '%s': category=%s, ssl=%s, mobile=%s, ttfb=%dms",
+                    "[worker] [Candidate %d/%d] Audit completed for '%s': category=%s, ssl=%s, mobile=%s, ttfb=%sms, tech=%s",
                     candidate_idx,
                     len(places),
                     b_name,
                     audit.get("category"),
                     audit.get("has_ssl"),
                     audit.get("is_mobile_responsive"),
-                    audit.get("ttfb_ms", 0),
+                    audit.get("ttfb_ms"),
+                    audit.get("detected_tech"),
                 )
+            except JobTimeoutException:
+                raise
             except Exception as exc:
-                exc_str = str(exc)
-                if any(err in exc_str for err in ["NS_ERROR_UNKNOWN_HOST", "ERR_NAME_NOT_RESOLVED", "Timeout", "net::ERR"]):
-                    logger.warning("[worker] Network error auditing %s, marking as DIGITAL_GHOST or skipping", b_name)
-                    audit = {
-                        "category": "DIGITAL_GHOST",
-                        "has_ssl": False,
-                        "is_mobile_responsive": False,
-                        "ttfb_ms": 0,
-                        "dom_load_time_ms": 0,
-                        "operational_bottleneck": f"Network error during audit: {exc}",
-                    }
-                else:
-                    logger.error(
-                        "[worker] [Candidate %d/%d] Audit exception for '%s' (%s): %s. Falling back to ghost profile.",
-                        candidate_idx,
-                        len(places),
-                        b_name,
-                        p_website,
-                        exc,
-                    )
-                    audit = {
-                        "category": "DIGITAL_GHOST" if not p_website else "LAGGY_UX",
-                        "has_ssl": False,
-                        "is_mobile_responsive": False,
-                        "ttfb_ms": 0,
-                        "dom_load_time_ms": 0,
-                        "operational_bottleneck": f"Audit failed: {exc}",
-                    }
+                logger.error(
+                    "[worker] [Candidate %d/%d] Audit exception for '%s' (%s): %s. Using fallback profile.",
+                    candidate_idx,
+                    len(places),
+                    b_name,
+                    p_website,
+                    exc,
+                )
+                audit = _fallback_audit(p_website, exc)
 
             # Upsert into PostgreSQL with ON CONFLICT DO NOTHING
             try:
@@ -372,9 +368,8 @@ def process_h3_cell(
                 logger.info("[worker] Pacing: sleeping %.1fs before next lead...", delay)
                 time.sleep(delay)
 
-        # Update search_history with newly found leads
-        if processed > 0:
-            _update_search_history(db, query, city, processed)
+        # Always record the run so the search doesn't stay RUNNING forever
+        _update_search_history(db, query, city, processed)
 
     finally:
         db.close()
@@ -391,43 +386,13 @@ def process_h3_cell(
         processed,
     )
 
-    # 4. Smart Spatial Expansion (Fallback):
-    # If the worker finds < 10 new leads in this cell, automatically expand outward into
-    # adjacent neighborhood cells using h3 k_ring/grid_disk, queuing unvisited cells.
     expanded_cells = []
-    if processed < 10:
-        seen_cells_key = f"seen_cells:{city.strip().lower()}:{query.strip().lower()}"
-        redis_conn.sadd(seen_cells_key, hex_id)
-        redis_conn.expire(seen_cells_key, 604800)
-
-        if expansion_depth < MAX_EXPANSION_DEPTH:
-            neighbors = get_neighboring_cells(hex_id, k=1)
-            unvisited = [c for c in sorted(neighbors) if not redis_conn.sismember(seen_cells_key, c)]
-            # Queue up to 2 unvisited adjacent cells for gradual expansion
-            to_queue = unvisited[:2]
-
-            if to_queue:
-                task_queue = Queue(QUEUE_NAME, connection=redis_conn)
-                for next_cell in to_queue:
-                    redis_conn.sadd(seen_cells_key, next_cell)
-                    redis_conn.expire(seen_cells_key, 604800)
-                    task_queue.enqueue(
-                        process_h3_cell, args=(next_cell, query, city, expansion_depth + 1), job_timeout=3600
-                    )
-                    expanded_cells.append(next_cell)
-                logger.info(
-                    "[worker] Smart Spatial Expansion: found %d (< 10) new leads in cell %s. "
-                    "Expanding outward into %d adjacent cell(s) at depth %d: %s",
-                    processed,
-                    hex_id,
-                    len(expanded_cells),
-                    expansion_depth + 1,
-                    expanded_cells,
-                )
-            else:
-                _handle_exhaustion(query, city)
-        else:
-            _handle_exhaustion(query, city)
+    if hit_daily_limit:
+        # The rest of this cell was never looked at: let a later run redo it,
+        # and don't burn neighbouring cells on jobs that would just bail out.
+        unmark_seen(redis_conn, city, query, hex_id)
+    else:
+        expanded_cells = _expand_coverage(hex_id, query, city, expansion_depth, processed)
 
     return {
         "hex_id": hex_id,
@@ -438,57 +403,106 @@ def process_h3_cell(
         "skipped_duplicates": skipped_duplicates,
         "leads_processed": processed,
         "expanded_cells": expanded_cells,
+        "status": "daily_limit_reached" if hit_daily_limit else "completed",
     }
 
 
-def _handle_exhaustion(query: str, city: str):
-    """Handle completely exhausted (city, niche) combinations by recording and macro-expanding."""
-    from app.db.models import CampaignTracker
-    from app.services.discovery.targets import get_next_search_target
-    from app.services.discovery.geo_grid import generate_city_cells
-    
+def _expand_coverage(
+    hex_id: str, query: str, city: str, expansion_depth: int, processed: int
+) -> list[str]:
+    """Smart Spatial Expansion, then exhaustion handling.
+
+    A cell yielding < EXPANSION_THRESHOLD new leads spills into up to
+    MAX_NEIGHBOURS_PER_EXPANSION unscanned neighbours inside the city grid.
+    Only once every cell of the city has been scanned is the (city, niche)
+    pair marked exhausted and the worker moved on to a fresh target.
+    """
+    try:
+        remaining = unseen_cells(redis_conn, city, query)
+    except ValueError:
+        # City has no bounding box (e.g. a macro target alias removed later)
+        return []
+
+    expanded_cells = []
+    if processed < EXPANSION_THRESHOLD and expansion_depth < MAX_EXPANSION_DEPTH:
+        remaining_set = set(remaining)
+        neighbours = sorted(c for c in get_neighboring_cells(hex_id, k=1) if c in remaining_set)
+        to_queue = neighbours[:MAX_NEIGHBOURS_PER_EXPANSION]
+        if to_queue:
+            mark_seen(redis_conn, city, query, to_queue)
+            task_queue = Queue(QUEUE_NAME, connection=redis_conn)
+            for next_cell in to_queue:
+                task_queue.enqueue(
+                    process_h3_cell,
+                    args=(next_cell, query, city, expansion_depth + 1),
+                    job_timeout=JOB_TIMEOUT_S,
+                )
+                expanded_cells.append(next_cell)
+            logger.info(
+                "[worker] Smart Spatial Expansion: found %d (< %d) new leads in cell %s. "
+                "Expanding outward into %d adjacent cell(s) at depth %d: %s",
+                processed,
+                EXPANSION_THRESHOLD,
+                hex_id,
+                len(expanded_cells),
+                expansion_depth + 1,
+                expanded_cells,
+            )
+            remaining = [c for c in remaining if c not in set(to_queue)]
+
+    if not remaining:
+        _handle_exhaustion(query, city)
+
+    return expanded_cells
+
+
+def _handle_exhaustion(query: str, city: str) -> None:
+    """Record a fully covered (city, niche) pair and macro-expand to a fresh target."""
     db = SessionLocal()
     try:
         norm_city = city.strip()
         norm_niche = query.strip()
-        
+        now = datetime.now(timezone.utc)
+
         tracker = db.execute(select(CampaignTracker).where(
             func.lower(CampaignTracker.city) == norm_city.lower(),
-            func.lower(CampaignTracker.niche) == norm_niche.lower()
+            func.lower(CampaignTracker.niche) == norm_niche.lower(),
         )).scalar_one_or_none()
-        
+
         if not tracker:
-            tracker = CampaignTracker(city=norm_city, niche=norm_niche, is_exhausted=True, last_scraped_at=datetime.now(timezone.utc))
-            db.add(tracker)
+            db.add(CampaignTracker(city=norm_city, niche=norm_niche, is_exhausted=True, last_scraped_at=now))
         else:
             tracker.is_exhausted = True
-            tracker.last_scraped_at = datetime.now(timezone.utc)
+            tracker.last_scraped_at = now
         db.commit()
-        
-        if get_leads_collected_today(redis_conn) < DAILY_LIMIT:
-            task_queue = Queue(QUEUE_NAME, connection=redis_conn)
-            for _ in range(50):
-                new_city, new_niche = get_next_search_target("random")
-                is_exh = db.execute(select(CampaignTracker).where(
-                    func.lower(CampaignTracker.city) == new_city.lower(),
-                    func.lower(CampaignTracker.niche) == new_niche.lower(),
-                    CampaignTracker.is_exhausted == True
-                )).scalar_one_or_none()
-                
-                if not is_exh:
-                    try:
-                        cells = generate_city_cells(new_city)[:6]
-                    except Exception:
-                        continue
-                        
-                    seen_cells_key = f"seen_cells:{new_city.strip().lower()}:{new_niche.strip().lower()}"
-                    for c in cells:
-                        redis_conn.sadd(seen_cells_key, c)
-                        redis_conn.expire(seen_cells_key, 604800)
-                        task_queue.enqueue(process_h3_cell, args=(c, new_niche, new_city, 0), job_timeout=3600)
-                        
-                    logger.info("[worker] Macro Expansion: Jumped to %s - %s", new_city, new_niche)
-                    break
+        logger.info("[worker] Campaign exhausted: every cell of '%s' scanned for '%s'.", norm_city, norm_niche)
+
+        if get_leads_collected_today(redis_conn) >= DAILY_LIMIT:
+            return
+
+        task_queue = Queue(QUEUE_NAME, connection=redis_conn)
+        for _ in range(50):
+            new_city, new_niche = get_next_search_target("random")
+            is_exh = db.execute(select(CampaignTracker.id).where(
+                func.lower(CampaignTracker.city) == new_city.lower(),
+                func.lower(CampaignTracker.niche) == new_niche.lower(),
+                CampaignTracker.is_exhausted.is_(True),
+            )).scalar_one_or_none()
+            if is_exh:
+                continue
+
+            try:
+                cells = unseen_cells(redis_conn, new_city, new_niche)[:MACRO_EXPANSION_CELLS]
+            except ValueError:
+                continue
+            if not cells:
+                continue
+
+            mark_seen(redis_conn, new_city, new_niche, cells)
+            for c in cells:
+                task_queue.enqueue(process_h3_cell, args=(c, new_niche, new_city, 0), job_timeout=JOB_TIMEOUT_S)
+            logger.info("[worker] Macro Expansion: Jumped to %s - %s", new_city, new_niche)
+            break
     except Exception as exc:
         db.rollback()
         logger.error("[worker] Failed macro expansion: %s", exc)

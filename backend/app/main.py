@@ -1,4 +1,4 @@
-from datetime import datetime, timedelta, timezone
+from datetime import datetime, timezone
 from typing import Literal
 import uuid
 
@@ -11,23 +11,35 @@ from sqlalchemy import func, select
 from sqlalchemy.orm import Session
 
 from app.core.config import settings
-from app.db.models import Lead, SearchHistory
+from app.db.models import CampaignTracker, Lead, SearchHistory
 from app.db.session import get_db
-from app.services.discovery.geo_grid import generate_city_cells
-from app.worker import QUEUE_NAME, process_h3_cell
+from app.services.discovery.coverage import mark_seen, unseen_cells
+from app.services.discovery.targets import BUSINESS_NICHES, CITY_BOUNDING_BOXES
 
 app = FastAPI(title=settings.PROJECT_NAME)
 
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=["http://localhost:3000", "http://127.0.0.1:3000"],
+    allow_origins=settings.CORS_ORIGINS,
     allow_credentials=True,
     allow_methods=["*"],
     allow_headers=["*"],
 )
 
 redis_conn = Redis.from_url(settings.REDIS_URL)
-task_queue = Queue(QUEUE_NAME, connection=redis_conn)
+task_queue = Queue(settings.QUEUE_NAME, connection=redis_conn)
+
+# Enqueued by dotted path so the API process never imports the browser stack
+PROCESS_CELL_TASK = "app.worker.process_h3_cell"
+JOB_TIMEOUT_S = 3600
+MAX_CELLS_PER_SCAN = 6
+
+LeadCategory = Literal[
+    "DIGITAL_GHOST",
+    "DIGITAL_DINOSAUR",
+    "LAGGY_UX",
+    "AUTOMATION_CANDIDATE",
+]
 
 OutreachStatus = Literal[
     "PENDING",
@@ -41,14 +53,15 @@ OutreachStatus = Literal[
 
 
 class ScrapeTriggerRequest(BaseModel):
-    query: str
-    city: str
-    max_cells: int = Field(default=6, le=6, ge=1)
+    query: str = Field(min_length=1, max_length=255)
+    city: str = Field(min_length=1, max_length=100)
+    max_cells: int = Field(default=MAX_CELLS_PER_SCAN, le=MAX_CELLS_PER_SCAN, ge=1)
 
 
 class ScrapeTriggerResponse(BaseModel):
     task_ids: list[str]
     cells_queued: int
+    cells_remaining: int
 
 
 class SearchHistoryOut(BaseModel):
@@ -64,8 +77,25 @@ class SearchHistoryOut(BaseModel):
     locked_until: datetime
 
 
+class ExhaustedCampaignOut(BaseModel):
+    city: str
+    niche: str
+    last_scraped_at: datetime
+
+
 class LeadStatusUpdate(BaseModel):
     status: OutreachStatus
+
+
+class LeadStatsOut(BaseModel):
+    total: int
+    by_category: dict[str, int]
+    opted_out: int
+
+
+class TargetsOut(BaseModel):
+    cities: list[str]
+    niches: list[str]
 
 
 class LeadOut(BaseModel):
@@ -129,19 +159,24 @@ def trigger_scrape(payload: ScrapeTriggerRequest, db: Session = Depends(get_db))
             headers={"Retry-After": str(remaining_s)},
         )
 
-    # 2. Generate H3 cells (strictly capped at max 6 cells)
+    # 2. Pick the next not-yet-scanned cells, nearest the city centre first,
+    # so each run covers new ground instead of re-scraping the same cells.
     try:
-        cells = generate_city_cells(payload.city)
+        candidates = unseen_cells(redis_conn, payload.city, payload.query)
     except ValueError as exc:
         raise HTTPException(status_code=400, detail=str(exc)) from exc
 
-    max_cells = min(max(1, payload.max_cells), 6)
-    selected_cells = cells[:max_cells]
+    if not candidates:
+        raise HTTPException(
+            status_code=409,
+            detail=(
+                f"Every area of '{payload.city}' has already been scanned for "
+                f"'{payload.query}' recently. Try a different city or niche."
+            ),
+        )
 
-    # Pre-seed seen_cells in Redis to prevent spatial expansion from re-running initial cells
-    seen_cells_key = f"seen_cells:{norm_city}:{norm_niche}"
-    for hex_id in selected_cells:
-        redis_conn.sadd(seen_cells_key, hex_id)
+    selected_cells = candidates[: payload.max_cells]
+    mark_seen(redis_conn, payload.city, payload.query, selected_cells)
 
     # 3. Update or create SearchHistory lock
     if history is None:
@@ -160,7 +195,7 @@ def trigger_scrape(payload: ScrapeTriggerRequest, db: Session = Depends(get_db))
     # 4. Enqueue initial H3 cells to RQ
     jobs = [
         task_queue.enqueue(
-            process_h3_cell, args=(hex_id, payload.query, payload.city, 0), job_timeout=3600
+            PROCESS_CELL_TASK, args=(hex_id, payload.query, payload.city, 0), job_timeout=JOB_TIMEOUT_S
         )
         for hex_id in selected_cells
     ]
@@ -168,7 +203,15 @@ def trigger_scrape(payload: ScrapeTriggerRequest, db: Session = Depends(get_db))
     return ScrapeTriggerResponse(
         task_ids=[job.id for job in jobs],
         cells_queued=len(jobs),
+        cells_remaining=len(candidates) - len(selected_cells),
     )
+
+
+@app.get("/api/targets", response_model=TargetsOut)
+def get_targets():
+    """Cities with a configured grid and suggested niches, for the scan form."""
+    cities = [key.replace("_", " ").title() for key in CITY_BOUNDING_BOXES]
+    return TargetsOut(cities=cities, niches=BUSINESS_NICHES)
 
 
 @app.get("/api/search-history", response_model=list[SearchHistoryOut])
@@ -193,19 +236,35 @@ def get_search_history(
     ]
 
 
-@app.get("/api/campaigns/exhausted")
+@app.get("/api/campaigns/exhausted", response_model=list[ExhaustedCampaignOut])
 def get_exhausted_campaigns(db: Session = Depends(get_db)):
-    from app.db.models import CampaignTracker
-    stmt = select(CampaignTracker).where(CampaignTracker.is_exhausted == True)
-    records = db.execute(stmt).scalars().all()
-    return [{"city": r.city, "niche": r.niche, "last_scraped_at": r.last_scraped_at} for r in records]
+    stmt = select(CampaignTracker).where(CampaignTracker.is_exhausted.is_(True))
+    return db.execute(stmt).scalars().all()
+
+
+@app.get("/api/leads/stats", response_model=LeadStatsOut)
+def lead_stats(db: Session = Depends(get_db)):
+    """Counts across all leads, independent of how many the dashboard loads."""
+    rows = db.execute(
+        select(Lead.category, Lead.opted_out, func.count()).group_by(Lead.category, Lead.opted_out)
+    ).all()
+
+    by_category: dict[str, int] = {}
+    opted_out = 0
+    for category, is_opted_out, count in rows:
+        if is_opted_out:
+            opted_out += count
+        else:
+            by_category[category] = by_category.get(category, 0) + count
+
+    return LeadStatsOut(total=sum(by_category.values()), by_category=by_category, opted_out=opted_out)
 
 
 @app.get("/api/leads", response_model=list[LeadOut])
 def list_leads(
-    category: str | None = None,
-    status: str | None = None,
-    limit: int = Query(default=50, le=200, gt=0),
+    category: LeadCategory | None = None,
+    status: OutreachStatus | None = None,
+    limit: int = Query(default=50, le=1000, gt=0),
     offset: int = Query(default=0, ge=0),
     db: Session = Depends(get_db),
 ):
