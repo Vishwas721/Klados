@@ -66,6 +66,11 @@ def is_duplicate_lead(
 ) -> bool:
     """Check PostgreSQL for an existing place_id, phone_number or matching (business_name, city).
 
+    place_id is a place's identity, so branches of a chain (same name, own
+    place_id and number) are separate leads. Name + city only decides when a
+    place_id is missing on either side. A shared phone always counts as a
+    duplicate: the same person shouldn't be pitched twice.
+
     Returns True if a lead already exists, meaning audit can be skipped.
     """
     if place_id and place_id.strip():
@@ -87,17 +92,13 @@ def is_duplicate_lead(
 
         conditions.append(db_phone.like(f"%{norm_phone[-10:]}"))
 
-    b_name = business_name.strip().lower()
+    name_match = func.lower(Lead.business_name) == business_name.strip().lower()
     if city and city.strip():
-        c_name = city.strip().lower()
-        conditions.append(
-            and_(
-                func.lower(Lead.business_name) == b_name,
-                func.lower(Lead.city) == c_name,
-            )
-        )
-    else:
-        conditions.append(func.lower(Lead.business_name) == b_name)
+        name_match = and_(name_match, func.lower(Lead.city) == city.strip().lower())
+    if place_id and place_id.strip():
+        # Both sides identified by place_id and they differ: a different branch
+        name_match = and_(name_match, Lead.place_id.is_(None))
+    conditions.append(name_match)
 
     if not conditions:
         return False
