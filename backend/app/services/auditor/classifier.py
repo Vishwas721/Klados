@@ -17,9 +17,11 @@ if _backend_root not in sys.path:
 
 import httpx
 
-OLLAMA_URL = "http://localhost:11434/api/generate"
-OLLAMA_MODEL = "llama3:8b"
-OLLAMA_TIMEOUT_S = 30.0
+from app.core.config import settings
+
+OLLAMA_URL = settings.OLLAMA_URL
+OLLAMA_MODEL = settings.OLLAMA_MODEL
+OLLAMA_TIMEOUT_S = settings.OLLAMA_TIMEOUT_S
 
 _PROMPT_TEMPLATE = """You are auditing a small business's website to find operational gaps \
 that automation could fix. Read the website text below and answer strictly with JSON \

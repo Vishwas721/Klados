@@ -2,14 +2,16 @@
 
 Categorizes a lead's website into a funnel bucket so downstream outreach can
 be tailored to what's actually broken instead of treating every lead the
-same: DIGITAL_GHOST (no site), DIGITAL_DINOSAUR (no HTTPS or not mobile
-responsive), LAGGY_UX (loads too slowly), AUTOMATION_CANDIDATE (a healthy
-site worth checking for missing booking/chat automation).
+same: DIGITAL_GHOST (no site, or a site that doesn't resolve), DIGITAL_DINOSAUR
+(no HTTPS or not mobile responsive), LAGGY_UX (loads too slowly),
+AUTOMATION_CANDIDATE (a healthy site worth checking for missing booking/chat
+automation).
 """
 
 import asyncio
 from pathlib import Path
 import sys
+import time
 
 # Ensure backend root is on sys.path when executed directly as a script
 _backend_root = str(Path(__file__).resolve().parents[3])
@@ -17,14 +19,28 @@ if _backend_root not in sys.path:
     sys.path.insert(0, _backend_root)
 
 from camoufox.async_api import AsyncCamoufox
+from playwright.async_api import Error as PlaywrightError
 from playwright.async_api import TimeoutError as PlaywrightTimeoutError
 
 from app.core.browser import camoufox_headless_mode
 from app.services.auditor.classifier import query_ollama
+from app.services.auditor.tech_detector import detect_stack
 
 NAV_TIMEOUT_MS = 15000
 DOM_LOAD_TIME_THRESHOLD_MS = 4500
 TTFB_THRESHOLD_MS = 1800
+
+# Navigation errors meaning the site itself is gone, not merely slow
+_UNREACHABLE_MARKERS = (
+    "NS_ERROR_UNKNOWN_HOST",
+    "NS_ERROR_CONNECTION_REFUSED",
+    "NS_ERROR_NET_RESET",
+    "NS_ERROR_NET_INTERRUPT",
+    "SSL_ERROR",
+    "SEC_ERROR",
+    "ERR_NAME_NOT_RESOLVED",
+    "ERR_CONNECTION_REFUSED",
+)
 
 _PERFORMANCE_JS = """
 () => {
@@ -38,9 +54,26 @@ _PERFORMANCE_JS = """
 """
 
 
-async def _audit_lead_async(website_url: str) -> dict:
-    has_ssl = website_url.startswith("https://")
+def classify_site(
+    has_ssl: bool, is_mobile_responsive: bool, ttfb_ms: float, dom_load_time_ms: float
+) -> str:
+    """Bucket a site that loaded, in strict priority order."""
+    if not has_ssl or not is_mobile_responsive:
+        return "DIGITAL_DINOSAUR"
+    if dom_load_time_ms > DOM_LOAD_TIME_THRESHOLD_MS or ttfb_ms > TTFB_THRESHOLD_MS:
+        return "LAGGY_UX"
+    return "AUTOMATION_CANDIDATE"
 
+
+def describe_unreachable(error_message: str) -> str | None:
+    """Short reason if a navigation error means the site is down, else None."""
+    for marker in _UNREACHABLE_MARKERS:
+        if marker in error_message:
+            return f"Website unreachable ({marker})"
+    return None
+
+
+async def _audit_lead_async(website_url: str) -> dict:
     camoufox = AsyncCamoufox(
         headless=camoufox_headless_mode(), geoip=True, humanize=True, os=["windows"]
     )
@@ -50,54 +83,70 @@ async def _audit_lead_async(website_url: str) -> dict:
         launched = True
         page = await browser.new_page()
 
+        started = time.monotonic()
         try:
             await page.goto(website_url, timeout=NAV_TIMEOUT_MS)
         except PlaywrightTimeoutError:
             # A site that can't finish loading within the strict timeout is,
             # by definition, laggy - categorize it rather than blow up the run.
+            try:
+                partial_html = await page.content()
+            except PlaywrightError:
+                partial_html = None
             return {
                 "category": "LAGGY_UX",
-                "has_ssl": has_ssl,
+                "has_ssl": page.url.startswith("https://"),
                 "is_mobile_responsive": None,
                 "ttfb_ms": None,
-                "dom_load_time_ms": None,
+                "dom_load_time_ms": NAV_TIMEOUT_MS,
+                "operational_bottleneck": f"Site did not finish loading within {NAV_TIMEOUT_MS // 1000}s",
+                **detect_stack(partial_html),
             }
+        except PlaywrightError as exc:
+            reason = describe_unreachable(str(exc))
+            if reason is None:
+                raise
+            # A listed website that doesn't resolve is as good as no website
+            return {
+                "category": "DIGITAL_GHOST",
+                "has_ssl": False,
+                "is_mobile_responsive": False,
+                "ttfb_ms": 0,
+                "dom_load_time_ms": 0,
+                "operational_bottleneck": reason,
+            }
+        elapsed_ms = (time.monotonic() - started) * 1000
 
+        # Judge HTTPS on where we landed: many listings say http:// but redirect
+        has_ssl = page.url.startswith("https://")
+
+        # Navigation timing is occasionally missing or zeroed by SPA routers;
+        # fall back to wall-clock time rather than scoring the site as instant.
         metrics = await page.evaluate(_PERFORMANCE_JS) or {}
-        ttfb_ms = metrics.get("ttfb_ms", 0.0)
-        dom_load_time_ms = metrics.get("dom_load_time_ms", 0.0)
+        ttfb_ms = metrics.get("ttfb_ms") or 0.0
+        dom_load_time_ms = metrics.get("dom_load_time_ms") or elapsed_ms
 
         is_mobile_responsive = await page.locator("meta[name='viewport']").count() > 0
+        stack = detect_stack(await page.content())
 
-        if not has_ssl or not is_mobile_responsive:
-            return {
-                "category": "DIGITAL_DINOSAUR",
-                "has_ssl": has_ssl,
-                "is_mobile_responsive": is_mobile_responsive,
-                "ttfb_ms": ttfb_ms,
-                "dom_load_time_ms": dom_load_time_ms,
-            }
-
-        if dom_load_time_ms > DOM_LOAD_TIME_THRESHOLD_MS or ttfb_ms > TTFB_THRESHOLD_MS:
-            return {
-                "category": "LAGGY_UX",
-                "has_ssl": has_ssl,
-                "is_mobile_responsive": is_mobile_responsive,
-                "ttfb_ms": ttfb_ms,
-                "dom_load_time_ms": dom_load_time_ms,
-            }
-
-        body_text = await page.inner_text("body")
-        findings = query_ollama(body_text)
-
-        return {
-            "category": "AUTOMATION_CANDIDATE",
+        category = classify_site(has_ssl, is_mobile_responsive, ttfb_ms, dom_load_time_ms)
+        result = {
+            "category": category,
             "has_ssl": has_ssl,
             "is_mobile_responsive": is_mobile_responsive,
             "ttfb_ms": ttfb_ms,
             "dom_load_time_ms": dom_load_time_ms,
-            **findings,
+            **stack,
         }
+
+        if category == "AUTOMATION_CANDIDATE":
+            findings = query_ollama(await page.inner_text("body"))
+            # Markup evidence wins; the LLM can only add what the HTML missed
+            result["has_chat_widget"] = stack["has_chat_widget"] or findings["has_chat_widget"]
+            result["has_online_booking"] = stack["has_online_booking"] or findings["has_online_booking"]
+            result["operational_bottleneck"] = findings["operational_bottleneck"]
+
+        return result
     finally:
         if launched:
             await camoufox.__aexit__(None, None, None)

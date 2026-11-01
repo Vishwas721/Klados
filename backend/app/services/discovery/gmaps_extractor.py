@@ -77,20 +77,14 @@ def is_duplicate_lead(
 
     conditions = []
     if phone_number and phone_number.strip():
-        norm_phone = phone_number.strip()
-        norm_phone = __import__('re').sub(r'[\s\-]', '', norm_phone)
-        if norm_phone.startswith('+91'):
-            norm_phone = norm_phone[3:]
-        elif norm_phone.startswith('91') and len(norm_phone) == 12:
-            norm_phone = norm_phone[2:]
-        elif norm_phone.startswith('0') and len(norm_phone) == 11:
-            norm_phone = norm_phone[1:]
-            
+        norm_phone = _normalize_phone(phone_number) or re.sub(r"\D", "", phone_number)
+        # Match on the last 10 digits so landlines stored with a leading 0
+        # and legacy rows stored with spaces/dashes/+91 still collide.
         db_phone = func.replace(Lead.phone_number, ' ', '')
         db_phone = func.replace(db_phone, '-', '')
         db_phone = func.replace(db_phone, '+91', '')
-        
-        conditions.append(db_phone.like(f"%{norm_phone}"))
+
+        conditions.append(db_phone.like(f"%{norm_phone[-10:]}"))
 
     b_name = business_name.strip().lower()
     if city and city.strip():
