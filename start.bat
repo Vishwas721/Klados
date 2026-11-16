@@ -26,7 +26,7 @@ echo Docker is running.
 :: 2. Start PostgreSQL and Redis
 echo [2/5] Starting PostgreSQL and Redis containers...
 cd /d "%PROJECT_DIR%"
-docker compose up -d postgres redis
+docker compose up -d postgres redis searxng
 if %errorlevel% neq 0 (
     echo ERROR: Failed to start Docker services.
     exit /b 1
@@ -68,6 +68,10 @@ if %errorlevel% equ 0 (
     echo WSL not detected. Starting native Python worker...
     start "Klados Worker" cmd /k "cd /d "%BACKEND_DIR%" && "%PYTHON%" -m app.worker"
 )
+
+:: 4b. Start the request radar (plain HTTP, runs fine natively on Windows)
+echo Starting request radar...
+start "Klados Request Radar" cmd /k "cd /d "%BACKEND_DIR%" && set SEARXNG_URL=http://localhost:8888 && "%PYTHON%" -m app.intent_poller"
 
 :: 5. Start FastAPI backend
 echo [5/5] Starting FastAPI backend on port 8000...

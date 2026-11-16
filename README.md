@@ -43,6 +43,25 @@ Dashboard (Next.js :3000) ──► API (FastAPI :8000) ──► Redis queue �
 Guardrails: at most 40 new leads per day (`DAILY_LIMIT`), 20 per cell, and a
 3–7 s random pause between audits.
 
+## Request radar
+
+Besides Maps, a second process (`python -m app.intent_poller`) watches places
+where people *ask* for work, scores each post 0-100, and drafts a first reply:
+
+| Source | How | Setup |
+| --- | --- | --- |
+| Freelancer.com | public projects API | none |
+| Reddit (r/forhire, r/slavelabour, r/india…) | RSS, or the API with `REDDIT_CLIENT_ID`/`SECRET` | optional; the RSS feed rate-limits hard |
+| Hacker News | monthly "Seeking freelancer?" thread via Algolia | none |
+| RSS feeds | any job feeds in `INTENT_RSS_FEEDS` | add URLs |
+| Open web | self-hosted SearXNG (in docker compose, :8888) | `SEARXNG_URL` |
+
+Freelancers advertising themselves, sales/lead-gen gigs and off-target work
+(apps, crypto, homework) are filtered or pushed down. Hot posts (70+) can ping
+you on Telegram (`TELEGRAM_BOT_TOKEN`, `TELEGRAM_CHAT_ID`); with Ollama running
+they also get a tailored summary and reply. Truelancer and Craigslist block
+bots, so they aren't sources.
+
 ## Running it
 
 Prerequisites: Docker, Node 20+, Python 3.11+. On Windows the worker runs in

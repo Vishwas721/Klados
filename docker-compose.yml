@@ -13,6 +13,7 @@ x-backend-env: &backend-env
   REDIS_PORT: 6379
   # Ollama runs on the host, not in the stack.
   OLLAMA_URL: http://host.docker.internal:11434/api/generate
+  SEARXNG_URL: http://searxng:8080
 
 services:
   postgres:
@@ -47,6 +48,18 @@ services:
       timeout: 5s
       retries: 5
 
+  # Free metasearch for the request radar's open-web source
+  searxng:
+    image: searxng/searxng:latest
+    container_name: klados_searxng
+    restart: unless-stopped
+    environment:
+      SEARXNG_SECRET: ${SEARXNG_SECRET:-klados-local-searxng}
+    ports:
+      - "127.0.0.1:${SEARXNG_PORT:-8888}:8080"
+    volumes:
+      - ./searxng/settings.yml:/etc/searxng/settings.yml:ro
+
   api:
     build:
       context: .
@@ -78,6 +91,26 @@ services:
         condition: service_started
       redis:
         condition: service_healthy
+
+  # Request radar: polls freelance boards, Reddit, HN, feeds and SearXNG
+  intent:
+    build:
+      context: .
+      dockerfile: Dockerfile.api
+    container_name: klados_intent
+    restart: unless-stopped
+    command: ["python", "-m", "app.intent_poller"]
+    environment:
+      <<: *backend-env
+    extra_hosts:
+      - "host.docker.internal:host-gateway"
+    depends_on:
+      api:
+        condition: service_started
+      redis:
+        condition: service_healthy
+      searxng:
+        condition: service_started
 
   frontend:
     build:

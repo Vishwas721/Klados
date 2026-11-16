@@ -1,26 +1,158 @@
 @import "tailwindcss";
 
+/* Klados — "the desk": warm paper, ink, and one signal colour. */
 :root {
-  --background: #ffffff;
-  --foreground: #171717;
-}
+  --paper: #f3efe6;
+  --card: #fbf9f4;
+  --sunk: #ebe5d8;
+  --ink: #1b1814;
+  --muted: #6e665a;
+  --faint: #a39a8b;
+  --line: #dcd4c4;
+  --signal: #e2531b;
+  --signal-ink: #ffffff;
+  --ok: #2f7d4f;
+  --bad: #c0392b;
+  --warn: #b7791f;
 
-@theme inline {
-  --color-background: var(--background);
-  --color-foreground: var(--foreground);
-  --font-sans: var(--font-geist-sans);
-  --font-mono: var(--font-geist-mono);
+  --c-build: #3550c4;
+  --c-fix: #c2410c;
+  --c-auto: #2f7d4f;
+  --c-ghost: #57606f;
+  --c-dino: #b7791f;
+  --c-lag: #c0392b;
+
+  color-scheme: light;
 }
 
 @media (prefers-color-scheme: dark) {
-  :root {
-    --background: #0a0a0a;
-    --foreground: #ededed;
+  :root:not([data-theme="light"]) {
+    --paper: #13120f;
+    --card: #1c1a16;
+    --sunk: #24211c;
+    --ink: #efe9dd;
+    --muted: #a0978a;
+    --faint: #6d665b;
+    --line: #2f2b25;
+    --signal: #ff7438;
+    --signal-ink: #1b1814;
+    --ok: #5fbf85;
+    --bad: #ef6b5b;
+    --warn: #e0a84a;
+
+    --c-build: #8fa2ff;
+    --c-fix: #ff8a52;
+    --c-auto: #5fbf85;
+    --c-ghost: #a9b1bf;
+    --c-dino: #e0a84a;
+    --c-lag: #ef6b5b;
+
+    color-scheme: dark;
   }
 }
 
+:root[data-theme="dark"] {
+  --paper: #13120f;
+  --card: #1c1a16;
+  --sunk: #24211c;
+  --ink: #efe9dd;
+  --muted: #a0978a;
+  --faint: #6d665b;
+  --line: #2f2b25;
+  --signal: #ff7438;
+  --signal-ink: #1b1814;
+  --ok: #5fbf85;
+  --bad: #ef6b5b;
+  --warn: #e0a84a;
+
+  --c-build: #8fa2ff;
+  --c-fix: #ff8a52;
+  --c-auto: #5fbf85;
+  --c-ghost: #a9b1bf;
+  --c-dino: #e0a84a;
+  --c-lag: #ef6b5b;
+
+  color-scheme: dark;
+}
+
+@theme inline {
+  --color-paper: var(--paper);
+  --color-card: var(--card);
+  --color-sunk: var(--sunk);
+  --color-ink: var(--ink);
+  --color-muted: var(--muted);
+  --color-faint: var(--faint);
+  --color-line: var(--line);
+  --color-signal: var(--signal);
+  --color-signal-ink: var(--signal-ink);
+  --color-ok: var(--ok);
+  --color-bad: var(--bad);
+  --color-warn: var(--warn);
+  --font-sans: var(--font-geist-sans);
+  --font-mono: var(--font-geist-mono);
+  --font-serif: var(--font-instrument-serif);
+}
+
+html,
 body {
-  background: var(--background);
-  color: var(--foreground);
-  font-family: Arial, Helvetica, sans-serif;
+  background: var(--paper);
+  color: var(--ink);
+}
+
+body {
+  font-family: var(--font-geist-sans), system-ui, sans-serif;
+  /* faint paper grain */
+  background-image: radial-gradient(color-mix(in oklab, var(--ink) 4%, transparent) 1px, transparent 1px);
+  background-size: 22px 22px;
+}
+
+::selection {
+  background: color-mix(in oklab, var(--signal) 30%, transparent);
+}
+
+:focus-visible {
+  outline: 2px solid var(--signal);
+  outline-offset: 2px;
+  border-radius: 6px;
+}
+
+.scroll-quiet {
+  scrollbar-width: thin;
+  scrollbar-color: var(--line) transparent;
+}
+
+@keyframes rise {
+  from {
+    opacity: 0;
+    transform: translateY(6px);
+  }
+  to {
+    opacity: 1;
+    transform: none;
+  }
+}
+
+.rise {
+  animation: rise 0.35s cubic-bezier(0.2, 0.7, 0.2, 1) both;
+}
+
+@keyframes breathe {
+  0%,
+  100% {
+    opacity: 1;
+  }
+  50% {
+    opacity: 0.35;
+  }
+}
+
+.breathe {
+  animation: breathe 2.4s ease-in-out infinite;
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .rise,
+  .breathe {
+    animation: none;
+  }
 }

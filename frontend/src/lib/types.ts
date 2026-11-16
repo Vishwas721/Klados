@@ -71,3 +71,58 @@ export interface ScanTargets {
   cities: string[];
   niches: string[];
 }
+
+// ── Request radar ────────────────────────────────────────────────────────────
+export type IntentSourceKey = "freelancer" | "reddit" | "hackernews" | "rss" | "web";
+export type IntentFit = "WEBSITE_BUILD" | "WEBSITE_FIX" | "AUTOMATION" | "OTHER";
+export type IntentStatus = "NEW" | "SAVED" | "REPLIED" | "WON" | "DISMISSED";
+
+export interface IntentPost {
+  id: string;
+  source: IntentSourceKey;
+  url: string;
+  title: string;
+  body: string;
+  author: string | null;
+  channel: string | null;
+  posted_at: string | null;
+  budget_min: number | null;
+  budget_max: number | null;
+  currency: string | null;
+  budget_usd: number | null;
+  bid_count: number | null;
+  fit: IntentFit;
+  score: number;
+  signals: string[];
+  is_local: boolean;
+  summary: string | null;
+  reply_draft: string | null;
+  status: IntentStatus;
+  created_at: string;
+}
+
+export interface IntentStats {
+  total: number;
+  by_status: Partial<Record<IntentStatus, number>>;
+  by_fit: Partial<Record<IntentFit, number>>;
+  by_source: Partial<Record<IntentSourceKey, number>>;
+  new_last_24h: number;
+  hot: number;
+}
+
+export interface IntentSource {
+  key: IntentSourceKey;
+  label: string;
+  configured: boolean;
+  setup_hint: string;
+  interval_s: number;
+  state: "ok" | "error" | "backing_off" | "not_configured" | null;
+  last_attempt_at: string | null;
+  last_ok_at: string | null;
+  last_error: string | null;
+  last_fetched: number | null;
+  last_new: number | null;
+  total_new: number;
+  backoff_s: number;
+  poll_requested: boolean;
+}

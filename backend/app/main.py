@@ -1,4 +1,4 @@
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 import secrets
 from typing import Literal
 import uuid
@@ -13,10 +13,11 @@ from sqlalchemy.orm import Session
 
 from app.core.config import settings
 from app.db.lookups import clear_stale_exhaustion, find_campaign, find_search_history
-from app.db.models import CampaignTracker, Lead, SearchHistory
+from app.db.models import CampaignTracker, IntentPost, Lead, SearchHistory
 from app.db.session import get_db
 from app.services.discovery.coverage import MAPS_BLOCKED_KEY, mark_seen, unseen_cells
 from app.services.discovery.targets import BUSINESS_NICHES, CITY_BOUNDING_BOXES
+from app.services.intent.poller import SOURCES, request_poll, source_status
 
 
 
@@ -333,3 +334,179 @@ def opt_out_lead(lead_id: uuid.UUID, db: Session = Depends(get_db)):
     db.commit()
     db.refresh(lead)
     return lead
+
+
+# ── Request radar ────────────────────────────────────────────────────────────
+
+IntentSource = Literal["freelancer", "reddit", "hackernews", "rss", "web"]
+IntentFit = Literal["WEBSITE_BUILD", "WEBSITE_FIX", "AUTOMATION", "OTHER"]
+IntentStatus = Literal["NEW", "SAVED", "REPLIED", "WON", "DISMISSED"]
+
+
+class IntentPostOut(BaseModel):
+    model_config = {"from_attributes": True}
+
+    id: uuid.UUID
+    source: str
+    url: str
+    title: str
+    body: str
+    author: str | None
+    channel: str | None
+    posted_at: datetime | None
+    budget_min: float | None
+    budget_max: float | None
+    currency: str | None
+    budget_usd: float | None
+    bid_count: int | None
+    fit: str
+    score: int
+    signals: list
+    is_local: bool
+    summary: str | None
+    reply_draft: str | None
+    status: str
+    created_at: datetime
+
+
+class IntentStatusUpdate(BaseModel):
+    status: IntentStatus
+
+
+class IntentStatsOut(BaseModel):
+    total: int
+    by_status: dict[str, int]
+    by_fit: dict[str, int]
+    by_source: dict[str, int]
+    new_last_24h: int
+    hot: int
+
+
+class IntentSourceOut(BaseModel):
+    key: str
+    label: str
+    configured: bool
+    setup_hint: str
+    interval_s: int
+    state: str | None = None
+    last_attempt_at: str | None = None
+    last_ok_at: str | None = None
+    last_error: str | None = None
+    last_fetched: int | None = None
+    last_new: int | None = None
+    total_new: int = 0
+    backoff_s: int = 0
+    poll_requested: bool = False
+
+
+HOT_SCORE = 70
+
+
+@app.get("/api/intent/posts", response_model=list[IntentPostOut])
+def list_intent_posts(
+    source: IntentSource | None = None,
+    fit: IntentFit | None = None,
+    status: IntentStatus | None = None,
+    min_score: int = Query(default=0, ge=0, le=100),
+    limit: int = Query(default=200, le=500, gt=0),
+    offset: int = Query(default=0, ge=0),
+    db: Session = Depends(get_db),
+):
+    stmt = select(IntentPost).where(IntentPost.score >= min_score)
+    if source:
+        stmt = stmt.where(IntentPost.source == source)
+    if fit:
+        stmt = stmt.where(IntentPost.fit == fit)
+    if status:
+        stmt = stmt.where(IntentPost.status == status)
+    stmt = stmt.order_by(IntentPost.created_at.desc(), IntentPost.score.desc()).limit(limit).offset(offset)
+    return db.execute(stmt).scalars().all()
+
+
+@app.get("/api/intent/stats", response_model=IntentStatsOut)
+def intent_stats(db: Session = Depends(get_db)):
+    rows = db.execute(
+        select(IntentPost.status, IntentPost.fit, IntentPost.source, func.count()).group_by(
+            IntentPost.status, IntentPost.fit, IntentPost.source
+        )
+    ).all()
+    by_status: dict[str, int] = {}
+    by_fit: dict[str, int] = {}
+    by_source: dict[str, int] = {}
+    for st, fit, src, count in rows:
+        by_status[st] = by_status.get(st, 0) + count
+        if st != "DISMISSED":
+            by_fit[fit] = by_fit.get(fit, 0) + count
+            by_source[src] = by_source.get(src, 0) + count
+
+    since = datetime.now(timezone.utc) - timedelta(hours=24)
+    new_last_24h = db.execute(
+        select(func.count()).select_from(IntentPost).where(IntentPost.created_at >= since)
+    ).scalar_one()
+    hot = db.execute(
+        select(func.count())
+        .select_from(IntentPost)
+        .where(IntentPost.status == "NEW", IntentPost.score >= HOT_SCORE)
+    ).scalar_one()
+    return IntentStatsOut(
+        total=sum(by_status.values()),
+        by_status=by_status,
+        by_fit=by_fit,
+        by_source=by_source,
+        new_last_24h=new_last_24h,
+        hot=hot,
+    )
+
+
+@app.patch("/api/intent/posts/{post_id}/status", response_model=IntentPostOut)
+def update_intent_status(post_id: uuid.UUID, payload: IntentStatusUpdate, db: Session = Depends(get_db)):
+    post = db.get(IntentPost, post_id)
+    if post is None:
+        raise HTTPException(status_code=404, detail="Post not found")
+    post.status = payload.status
+    db.commit()
+    db.refresh(post)
+    return post
+
+
+def _int_or_none(value: str | None) -> int | None:
+    try:
+        return int(value) if value not in (None, "") else None
+    except ValueError:
+        return None
+
+
+@app.get("/api/intent/sources", response_model=list[IntentSourceOut])
+def list_intent_sources():
+    out = []
+    for key, spec in SOURCES.items():
+        try:
+            st = source_status(redis_conn, key)
+        except Exception:
+            st = {}
+        out.append(
+            IntentSourceOut(
+                key=key,
+                label=spec.label,
+                configured=spec.is_configured(),
+                setup_hint=spec.setup_hint,
+                interval_s=spec.interval_s(),
+                state=st.get("state") or None,
+                last_attempt_at=st.get("last_attempt_at") or None,
+                last_ok_at=st.get("last_ok_at") or None,
+                last_error=st.get("last_error") or None,
+                last_fetched=_int_or_none(st.get("last_fetched")),
+                last_new=_int_or_none(st.get("last_new")),
+                total_new=_int_or_none(st.get("total_new")) or 0,
+                backoff_s=st.get("backoff_s", 0),
+                poll_requested=st.get("poll_requested", False),
+            )
+        )
+    return out
+
+
+@app.post("/api/intent/sources/{source}/poll", status_code=202)
+def poll_intent_source(source: IntentSource):
+    """Ask the request radar to poll this source on its next tick (~10 s)."""
+    request_poll(redis_conn, source)
+    return {"source": source, "queued": True}

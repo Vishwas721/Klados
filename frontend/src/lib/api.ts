@@ -1,5 +1,11 @@
 import {
   ExhaustedCampaign,
+  IntentFit,
+  IntentPost,
+  IntentSource,
+  IntentSourceKey,
+  IntentStats,
+  IntentStatus,
   Lead,
   LeadStats,
   OutreachStatus,
@@ -103,4 +109,39 @@ export async function fetchExhaustedCampaigns(): Promise<ExhaustedCampaign[]> {
 
 export async function fetchScanTargets(): Promise<ScanTargets> {
   return getJson("/api/targets", "Failed to fetch scan targets");
+}
+
+// ── Request radar ────────────────────────────────────────────────────────────
+export async function fetchIntentPosts(
+  params: { source?: IntentSourceKey; fit?: IntentFit; status?: IntentStatus; minScore?: number; limit?: number } = {}
+): Promise<IntentPost[]> {
+  const search = new URLSearchParams();
+  if (params.source) search.set("source", params.source);
+  if (params.fit) search.set("fit", params.fit);
+  if (params.status) search.set("status", params.status);
+  if (params.minScore) search.set("min_score", String(params.minScore));
+  search.set("limit", String(params.limit ?? 300));
+  return getJson(`/api/intent/posts?${search.toString()}`, "Failed to fetch requests");
+}
+
+export async function fetchIntentStats(): Promise<IntentStats> {
+  return getJson("/api/intent/stats", "Failed to fetch request stats");
+}
+
+export async function updateIntentStatus(id: string, status: IntentStatus): Promise<IntentPost> {
+  const res = await apiFetch(`/api/intent/posts/${id}/status`, {
+    method: "PATCH",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ status }),
+  });
+  return (await ensureOk(res, "Failed to update request")).json();
+}
+
+export async function fetchIntentSources(): Promise<IntentSource[]> {
+  return getJson("/api/intent/sources", "Failed to fetch sources");
+}
+
+export async function pollIntentSource(source: IntentSourceKey): Promise<void> {
+  const res = await apiFetch(`/api/intent/sources/${source}/poll`, { method: "POST" });
+  await ensureOk(res, "Failed to queue poll");
 }

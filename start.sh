@@ -63,7 +63,7 @@ echo "      Docker is running."
 # ─────────────────────────────────────────────────────────────────────────────
 echo ""
 echo "[2/5] Starting PostgreSQL and Redis..."
-(cd "$PROJECT_DIR" && docker compose up -d postgres redis)
+(cd "$PROJECT_DIR" && docker compose up -d postgres redis searxng)
 
 echo "      Waiting for PostgreSQL to be healthy (up to 30 s)..."
 MAX_WAIT=30
@@ -158,7 +158,7 @@ cleanup() {
     wait 2>/dev/null || true
 
     echo " Stopping Docker containers..."
-    (cd "$PROJECT_DIR" && docker compose stop postgres redis) 2>/dev/null || true
+    (cd "$PROJECT_DIR" && docker compose stop postgres redis searxng) 2>/dev/null || true
 
     echo " All services stopped. Goodbye."
     # Deactivate venv if still active
@@ -189,6 +189,18 @@ WORKER_PID=$!
 PIDS+=("$WORKER_PID")
 echo "       Worker PID $WORKER_PID  →  logs/worker.log"
 
+# ── 4a2: Request radar (plain HTTP, no browser needed)
+(
+    source "$VENV_DIR/bin/activate"
+    cd "$BACKEND_DIR"
+    export PYTHONPATH="$BACKEND_DIR:${PYTHONPATH:-}"
+    export SEARXNG_URL="${SEARXNG_URL:-http://localhost:8888}"
+    python -m app.intent_poller
+) >"$LOG_DIR/intent.log" 2>&1 &
+INTENT_PID=$!
+PIDS+=("$INTENT_PID")
+echo "       Request radar PID $INTENT_PID  →  logs/intent.log"
+
 # ── 4b: FastAPI backend (background)
 echo ""
 echo "[5/5] Starting FastAPI backend on :8000..."
@@ -217,6 +229,7 @@ echo "========================================="
 echo "  FastAPI  →  http://localhost:8000"
 echo "  Frontend →  http://localhost:3000"
 echo "  Worker   →  logs/worker.log"
+echo "  Radar    →  logs/intent.log"
 echo "  API      →  logs/api.log"
 echo "  Press Ctrl+C to stop all services"
 echo "========================================="

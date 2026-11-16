@@ -135,6 +135,60 @@ class SearchHistory(Base):
         return last_run + timedelta(hours=24)
 
 
+class IntentPost(Base):
+    """A public post where someone asks for a website, a fix, or automation.
+
+    Collected by the request radar (app.services.intent) from freelance
+    boards, Reddit, HN and the open web. Plain strings instead of enums so
+    adding a source or fit doesn't need a type migration; the API validates.
+    """
+
+    __tablename__ = "intent_posts"
+
+    id: Mapped[uuid.UUID] = mapped_column(
+        UUID(as_uuid=True), primary_key=True, default=uuid.uuid4
+    )
+    source: Mapped[str] = mapped_column(String(20), nullable=False, index=True)
+    external_id: Mapped[str] = mapped_column(String(255), nullable=False)
+    url: Mapped[str] = mapped_column(Text, nullable=False)
+    title: Mapped[str] = mapped_column(String(500), nullable=False)
+    body: Mapped[str] = mapped_column(Text, default="")
+    author: Mapped[str | None] = mapped_column(String(255), nullable=True)
+    # Subreddit, feed name, search query… whatever narrows down "where"
+    channel: Mapped[str | None] = mapped_column(String(255), nullable=True)
+    posted_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True, index=True)
+
+    budget_min: Mapped[float | None] = mapped_column(Float, nullable=True)
+    budget_max: Mapped[float | None] = mapped_column(Float, nullable=True)
+    currency: Mapped[str | None] = mapped_column(String(10), nullable=True)
+    budget_usd: Mapped[float | None] = mapped_column(Float, nullable=True)
+    bid_count: Mapped[int | None] = mapped_column(Integer, nullable=True)
+
+    # WEBSITE_BUILD | WEBSITE_FIX | AUTOMATION | OTHER
+    fit: Mapped[str] = mapped_column(String(30), nullable=False, index=True)
+    score: Mapped[int] = mapped_column(Integer, default=0, index=True)
+    signals: Mapped[list] = mapped_column(JSON, default=list)
+    is_local: Mapped[bool] = mapped_column(Boolean, default=False)
+
+    summary: Mapped[str | None] = mapped_column(Text, nullable=True)
+    reply_draft: Mapped[str | None] = mapped_column(Text, nullable=True)
+
+    # NEW | SAVED | REPLIED | WON | DISMISSED
+    status: Mapped[str] = mapped_column(String(20), default="NEW", index=True)
+    alerted: Mapped[bool] = mapped_column(Boolean, default=False)
+
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), server_default=func.now(), index=True
+    )
+    updated_at: Mapped[datetime | None] = mapped_column(
+        DateTime(timezone=True), onupdate=func.now()
+    )
+
+    __table_args__ = (
+        UniqueConstraint("source", "external_id", name="uq_intent_posts_source_external"),
+    )
+
+
 class CampaignTracker(Base):
     __tablename__ = "campaign_tracker"
 
