@@ -53,3 +53,25 @@ def test_site_auditor_skips_browser_for_ghosts():
     with SiteAuditor() as auditor:
         assert auditor.audit(None) == {"category": "DIGITAL_GHOST"}
         assert auditor._browser is None and auditor._loop is None
+
+
+def test_https_available_probes_https_version():
+    import httpx
+    from app.services.auditor.site_auditor import https_available
+
+    seen = []
+
+    def ok(request):
+        seen.append(str(request.url))
+        return httpx.Response(403)  # bot wall still proves TLS works
+
+    with httpx.Client(transport=httpx.MockTransport(ok)) as client:
+        assert https_available("http://www.bozowags.com/about?x=1", client)
+    assert seen == ["https://www.bozowags.com/about?x=1"]
+
+    def broken(request):
+        raise httpx.ConnectError("certificate verify failed")
+
+    with httpx.Client(transport=httpx.MockTransport(broken)) as client:
+        assert not https_available("http://www.spacenform.com/", client)
+    assert not https_available("not a url")

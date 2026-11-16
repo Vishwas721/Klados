@@ -12,6 +12,9 @@ import asyncio
 from pathlib import Path
 import sys
 import time
+from urllib.parse import urlsplit, urlunsplit
+
+import httpx
 
 # Ensure backend root is on sys.path when executed directly as a script
 _backend_root = str(Path(__file__).resolve().parents[3])
@@ -29,6 +32,7 @@ from app.services.auditor.tech_detector import detect_stack
 NAV_TIMEOUT_MS = 15000
 DOM_LOAD_TIME_THRESHOLD_MS = 4500
 TTFB_THRESHOLD_MS = 1800
+HTTPS_PROBE_TIMEOUT_S = 8.0
 
 # Navigation errors meaning the site itself is gone, not merely slow
 _UNREACHABLE_MARKERS = (
@@ -63,6 +67,30 @@ def classify_site(
     if dom_load_time_ms > DOM_LOAD_TIME_THRESHOLD_MS or ttfb_ms > TTFB_THRESHOLD_MS:
         return "LAGGY_UX"
     return "AUTOMATION_CANDIDATE"
+
+
+def https_available(url: str, client: httpx.Client | None = None) -> bool:
+    """True if the site answers over HTTPS with a valid certificate.
+
+    Plenty of sites serve HTTPS fine but never redirect http:// to it, so
+    landing on http:// alone doesn't mean the business lacks SSL. Any HTTP
+    response (even a 403 from bot protection) proves the TLS handshake and
+    certificate are good.
+    """
+    parts = urlsplit(url)
+    if not parts.netloc:
+        return False
+    https_url = urlunsplit(("https", parts.netloc, parts.path or "/", parts.query, ""))
+    own_client = client is None
+    client = client or httpx.Client(timeout=HTTPS_PROBE_TIMEOUT_S, follow_redirects=False)
+    try:
+        client.get(https_url)
+        return True
+    except httpx.HTTPError:
+        return False
+    finally:
+        if own_client:
+            client.close()
 
 
 def describe_unreachable(error_message: str) -> str | None:
@@ -108,8 +136,9 @@ async def _audit_page(page, website_url: str) -> dict:
         }
     elapsed_ms = (time.monotonic() - started) * 1000
 
-    # Judge HTTPS on where we landed: many listings say http:// but redirect
-    has_ssl = page.url.startswith("https://")
+    # Judge HTTPS on where we landed: many listings say http:// but redirect.
+    # If we landed on http://, check whether HTTPS works anyway.
+    has_ssl = page.url.startswith("https://") or await asyncio.to_thread(https_available, page.url)
 
     # Navigation timing is occasionally missing or zeroed by SPA routers;
     # fall back to wall-clock time rather than scoring the site as instant.

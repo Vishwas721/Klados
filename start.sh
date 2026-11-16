@@ -236,4 +236,23 @@ echo "========================================="
 echo ""
 
 cd "$FRONTEND_DIR"
-npm run dev -- -H 127.0.0.1
+
+# node_modules is shared with Windows, so its native binaries (Next's SWC,
+# Tailwind's oxide) are usually the win32 builds. Under WSL, run the
+# dashboard with Windows' Node unless a Linux install is present.
+if command -v node >/dev/null 2>&1 && ls node_modules/@next 2>/dev/null | grep -q linux; then
+    npm run dev -- -H 127.0.0.1
+elif grep -qi microsoft /proc/version 2>/dev/null && command -v cmd.exe >/dev/null 2>&1; then
+    # cmd.exe starts in the Windows path of the current directory
+    if [ ! -d node_modules ]; then
+        echo "Installing frontend dependencies with Windows npm..."
+        cmd.exe /c npm install
+    fi
+    cmd.exe /c npm run dev -- -H 127.0.0.1
+elif command -v node >/dev/null 2>&1; then
+    [ -d node_modules ] || npm install
+    npm run dev -- -H 127.0.0.1
+else
+    echo "ERROR: Node.js not found. Install Node 20+ (Windows or Linux) to run the dashboard."
+    exit 1
+fi

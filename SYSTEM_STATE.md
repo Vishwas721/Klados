@@ -86,7 +86,7 @@ Buckets are assigned in a strict fallback chain (`classify_site()` in `site_audi
 
 ## 6. Environment & Startup Orchestration
 
-*   **Single `docker-compose.yml`** at the repo root (project name `klados`): `postgres`, `redis`, `api`, `worker`, `frontend`. Containers are named `klados_*`. Volumes are pinned to `backend_postgres_data` / `backend_redis_data`, the names from the old `lead-radar/backend` layout, so existing data carries over. Host ports default to **5434** / **6380** (krama owns 5433 / 6379) and can be overridden with `POSTGRES_PORT` / `REDIS_PORT`. Every published port, and uvicorn / Next.js in the start scripts, binds to **127.0.0.1** only.
+*   **Single `docker-compose.yml`** at the repo root (project name `klados`): `postgres`, `redis`, `api`, `worker`, `frontend`. Containers are named `klados_*`. Volumes are pinned to `backend_postgres_data` / `backend_redis_data`, the names from the old `lead-radar/backend` layout, so existing data carries over. Host ports default to **5544** / **6380** (krama owns 5433 / 6379; other local projects use 5434) and can be overridden with `POSTGRES_PORT` / `REDIS_PORT`. Every published port, and uvicorn / Next.js in the start scripts, binds to **127.0.0.1** only.
 *   **`start.sh` Orchestration**:
     *   **WSL Bounce**: Detects if executed in Git Bash (MINGW64/CYGWIN) and actively bounces the script to execute natively via `wsl -e bash "$WSL_PATH/start.sh"`.
     *   **Docker Dependency**: Brings up only PostgreSQL and Redis via `docker compose up -d postgres redis`.
