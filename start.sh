@@ -41,6 +41,13 @@ LOG_DIR="$PROJECT_DIR/logs"
 
 mkdir -p "$LOG_DIR"
 
+# The radar may already run always-on in Docker (docker compose up -d intent);
+# then don't start a second copy or stop the database it uses on exit.
+RADAR_IN_DOCKER=0
+if docker ps --filter name=^klados_intent$ --filter status=running -q 2>/dev/null | grep -q .; then
+    RADAR_IN_DOCKER=1
+fi
+
 echo "========================================="
 echo "   Klados 1-Click Startup"
 echo "   Project: $PROJECT_DIR"
@@ -157,8 +164,12 @@ cleanup() {
     sleep 1
     wait 2>/dev/null || true
 
-    echo " Stopping Docker containers..."
-    (cd "$PROJECT_DIR" && docker compose stop postgres redis searxng) 2>/dev/null || true
+    if [ "$RADAR_IN_DOCKER" = "1" ]; then
+        echo " Leaving Docker containers up for the always-on radar."
+    else
+        echo " Stopping Docker containers..."
+        (cd "$PROJECT_DIR" && docker compose stop postgres redis searxng) 2>/dev/null || true
+    fi
 
     echo " All services stopped. Goodbye."
     # Deactivate venv if still active
@@ -190,16 +201,20 @@ PIDS+=("$WORKER_PID")
 echo "       Worker PID $WORKER_PID  →  logs/worker.log"
 
 # ── 4a2: Request radar (plain HTTP, no browser needed)
-(
-    source "$VENV_DIR/bin/activate"
-    cd "$BACKEND_DIR"
-    export PYTHONPATH="$BACKEND_DIR:${PYTHONPATH:-}"
-    export SEARXNG_URL="${SEARXNG_URL:-http://localhost:8888}"
-    python -m app.intent_poller
-) >"$LOG_DIR/intent.log" 2>&1 &
-INTENT_PID=$!
-PIDS+=("$INTENT_PID")
-echo "       Request radar PID $INTENT_PID  →  logs/intent.log"
+if [ "$RADAR_IN_DOCKER" = "1" ]; then
+    echo "       Request radar already running always-on in Docker (klados_intent)"
+else
+    (
+        source "$VENV_DIR/bin/activate"
+        cd "$BACKEND_DIR"
+        export PYTHONPATH="$BACKEND_DIR:${PYTHONPATH:-}"
+        export SEARXNG_URL="${SEARXNG_URL:-http://localhost:8888}"
+        python -m app.intent_poller
+    ) >"$LOG_DIR/intent.log" 2>&1 &
+    INTENT_PID=$!
+    PIDS+=("$INTENT_PID")
+    echo "       Request radar PID $INTENT_PID  →  logs/intent.log"
+fi
 
 # ── 4b: FastAPI backend (background)
 echo ""

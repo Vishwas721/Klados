@@ -1,3 +1,6 @@
+# Personal settings and keys
+.env
+
 # Runtime logs
 logs/
 

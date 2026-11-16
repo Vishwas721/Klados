@@ -62,6 +62,26 @@ you on Telegram (`TELEGRAM_BOT_TOKEN`, `TELEGRAM_CHAT_ID`); with Ollama running
 they also get a tailored summary and reply. Truelancer and Craigslist block
 bots, so they aren't sources.
 
+Freelancer.com projects get a **bid proposal** instead of a chat message: a
+3-step plan, a suggested price about a third into the client's range (never
+under their minimum) and a delivery time. Set `PORTFOLIO_URL` so the draft
+links your work.
+
+**Keeping the radar on when Klados isn't running.** Run it as its own
+container once; Docker restarts it whenever Docker Desktop starts:
+
+```bash
+docker compose up -d --build intent     # start (and after code changes)
+docker compose stop intent              # pause it
+docker compose logs -f intent           # watch it
+```
+
+Turn on *Docker Desktop → Settings → General → Start Docker Desktop when you
+sign in*. `start.sh` detects the container and won't start a second radar
+or stop its database. If the PC was off or asleep, the next Freelancer.com
+pass pages back to where the last one ended (up to `FREELANCER_MAX_PAGES`
+pages of 50 per query), so nothing still open is missed, only the head start.
+
 ## Running it
 
 Prerequisites: Docker, Node 20+, Python 3.11+. On Windows the worker runs in

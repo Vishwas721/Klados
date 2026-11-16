@@ -99,6 +99,17 @@ export interface IntentPost {
   reply_draft: string | null;
   status: IntentStatus;
   created_at: string;
+  /** Marketplace projects only: what to bid, from the client's budget */
+  bid: SuggestedBid | null;
+}
+
+export interface SuggestedBid {
+  amount: number;
+  currency: string;
+  hourly: boolean;
+  days: number | null;
+  label: string;
+  rationale: string;
 }
 
 export interface IntentStats {

@@ -241,7 +241,7 @@ class FakeDb:
 
 def test_poll_source_records_success(fake_redis, monkeypatch):
     spec = poller.SOURCES["hackernews"]
-    monkeypatch.setitem(poller.SOURCES, "hackernews", spec.__class__(**{**spec.__dict__, "fetch": lambda c: [post("t")]}))
+    monkeypatch.setitem(poller.SOURCES, "hackernews", spec.__class__(**{**spec.__dict__, "fetch": lambda c, since: [post("t")]}))
     monkeypatch.setattr(poller, "save_posts", lambda db, posts, now=None: ["row"])
     monkeypatch.setattr(poller, "enrich_and_alert", lambda db, rows: None)
 
@@ -252,7 +252,7 @@ def test_poll_source_records_success(fake_redis, monkeypatch):
 
 
 def test_poll_source_backs_off_after_rate_limit(fake_redis, monkeypatch):
-    def limited(client):
+    def limited(client, since=None):
         raise SourceRateLimited("reddit", 900)
 
     spec = poller.SOURCES["reddit"]
@@ -279,3 +279,64 @@ def test_run_once_polls_due_and_requested_sources(fake_redis, monkeypatch):
     poller.request_poll(fake_redis, "rss")
     intent_poller.run_once(fake_redis, now=1_000_000_005)
     assert polled == ["rss"]
+
+
+# ── bids ─────────────────────────────────────────────────────────────────────
+
+from app.services.intent.bidding import proposal_text, suggest_bid  # noqa: E402
+
+
+def test_bid_sits_a_third_into_the_range_and_rounds():
+    bid = suggest_bid(budget_min=12500, budget_max=37500, currency="INR", hourly=False,
+                      fit="WEBSITE_BUILD", budget_usd=428)
+    assert bid.amount == 21500  # 12,500 + 35% of 25,000 = 21,250 → nearest 500
+    assert bid.days == 7 and bid.label == "₹21,500 · 7 days"
+
+
+def test_bid_never_goes_under_the_minimum_and_handles_hourly():
+    flat = suggest_bid(budget_min=30, budget_max=30, currency="USD", hourly=False, fit="WEBSITE_FIX", budget_usd=30)
+    assert flat.amount == 30 and flat.days == 3
+    hourly = suggest_bid(budget_min=15, budget_max=25, currency="USD", hourly=True, fit="AUTOMATION", budget_usd=500)
+    assert hourly.hourly and hourly.days is None and hourly.label == "$20/hour"
+    assert suggest_bid(budget_min=None, budget_max=None, currency="USD", hourly=False, fit="OTHER", budget_usd=None) is None
+
+
+def test_proposal_has_plan_price_portfolio_and_question(monkeypatch):
+    from app.services.intent import bidding
+    monkeypatch.setattr(bidding.settings, "PORTFOLIO_URL", "https://me.example")
+    bid = suggest_bid(budget_min=100, budget_max=300, currency="USD", hourly=False, fit="WEBSITE_BUILD", budget_usd=300)
+    text = proposal_text("WEBSITE_BUILD", "a site for my bakery", bid)
+    assert 'brief for "a site for my bakery".' in text and "1. " in text and "3. " in text
+    assert "Price: $170 fixed, ready in 7 days" in text
+    assert "Recent work: https://me.example" in text and text.rstrip().endswith("?")
+
+
+def test_freelancer_fetch_pages_back_to_since(monkeypatch):
+    monkeypatch.setattr(freelancer.settings, "FREELANCER_QUERIES", ["website"])
+    monkeypatch.setattr(freelancer, "PAGE_GAP_S", 0)
+    base = 1794810000
+
+    def page(offset):
+        # each page: 50 projects, 10 min apart, getting older with the offset
+        return {"result": {"projects": [
+            {"id": offset + i + 1, "title": f"p{offset + i}", "time_submitted": base - (offset + i) * 600}
+            for i in range(50)
+        ]}}
+
+    offsets = []
+
+    def handler(request):
+        off = int(request.url.params["offset"])
+        offsets.append(off)
+        return httpx.Response(200, json=page(off))
+
+    since = datetime.fromtimestamp(base - 70 * 600, timezone.utc)  # ~ project 70
+    with httpx.Client(transport=httpx.MockTransport(handler)) as client:
+        posts = freelancer.fetch(client, since)
+    assert offsets == [0, 50]  # second page reaches past `since`, so it stops
+    assert len(posts) == 100
+
+    offsets.clear()
+    with httpx.Client(transport=httpx.MockTransport(handler)) as client:
+        freelancer.fetch(client, None)
+    assert offsets == [0]  # first run: newest page only

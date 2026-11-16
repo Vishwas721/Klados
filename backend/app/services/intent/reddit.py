@@ -105,7 +105,7 @@ def _fetch_group(client: httpx.Client, subs: str, token: str | None) -> list[Raw
     return parse_atom(res.text)
 
 
-def fetch(client: httpx.Client) -> list[RawPost]:
+def fetch(client: httpx.Client, since=None) -> list[RawPost]:
     token = None
     if settings.REDDIT_CLIENT_ID and settings.REDDIT_CLIENT_SECRET:
         token = _oauth_token(client)

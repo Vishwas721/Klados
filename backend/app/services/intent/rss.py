@@ -79,7 +79,7 @@ def is_configured() -> bool:
     return bool(settings.INTENT_RSS_FEEDS)
 
 
-def fetch(client: httpx.Client) -> list[RawPost]:
+def fetch(client: httpx.Client, since=None) -> list[RawPost]:
     if not is_configured():
         raise SourceNotConfigured("Add feed URLs to INTENT_RSS_FEEDS")
     posts: list[RawPost] = []

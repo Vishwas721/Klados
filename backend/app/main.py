@@ -17,6 +17,7 @@ from app.db.models import CampaignTracker, IntentPost, Lead, SearchHistory
 from app.db.session import get_db
 from app.services.discovery.coverage import MAPS_BLOCKED_KEY, mark_seen, unseen_cells
 from app.services.discovery.targets import BUSINESS_NICHES, CITY_BOUNDING_BOXES
+from app.services.intent.bidding import bid_for_post
 from app.services.intent.poller import SOURCES, request_poll, source_status
 
 
@@ -343,6 +344,15 @@ IntentFit = Literal["WEBSITE_BUILD", "WEBSITE_FIX", "AUTOMATION", "OTHER"]
 IntentStatus = Literal["NEW", "SAVED", "REPLIED", "WON", "DISMISSED"]
 
 
+class SuggestedBidOut(BaseModel):
+    amount: float
+    currency: str
+    hourly: bool
+    days: int | None
+    label: str
+    rationale: str
+
+
 class IntentPostOut(BaseModel):
     model_config = {"from_attributes": True}
 
@@ -367,6 +377,16 @@ class IntentPostOut(BaseModel):
     reply_draft: str | None
     status: str
     created_at: datetime
+    # Marketplace projects only: what to bid, derived from the client's budget
+    bid: SuggestedBidOut | None = None
+
+
+def intent_out(post: IntentPost) -> IntentPostOut:
+    bid = bid_for_post(post)
+    out = IntentPostOut.model_validate(post)
+    if bid is not None:
+        out.bid = SuggestedBidOut(**bid.as_dict())
+    return out
 
 
 class IntentStatusUpdate(BaseModel):
@@ -420,7 +440,7 @@ def list_intent_posts(
     if status:
         stmt = stmt.where(IntentPost.status == status)
     stmt = stmt.order_by(IntentPost.created_at.desc(), IntentPost.score.desc()).limit(limit).offset(offset)
-    return db.execute(stmt).scalars().all()
+    return [intent_out(p) for p in db.execute(stmt).scalars().all()]
 
 
 @app.get("/api/intent/stats", response_model=IntentStatsOut)
@@ -466,7 +486,7 @@ def update_intent_status(post_id: uuid.UUID, payload: IntentStatusUpdate, db: Se
     post.status = payload.status
     db.commit()
     db.refresh(post)
-    return post
+    return intent_out(post)
 
 
 def _int_or_none(value: str | None) -> int | None:

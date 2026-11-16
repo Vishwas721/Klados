@@ -28,9 +28,10 @@ from app.services.intent.base import (
     SourceRateLimited,
     make_client,
 )
+from app.services.intent.bidding import bid_for_post, suggest_bid
 from app.services.intent.notify import alerts_enabled, send_alert
 from app.services.intent.scoring import assess
-from app.services.intent.writer import ollama_enrich, template_reply
+from app.services.intent.writer import draft_reply, ollama_enrich
 
 logger = logging.getLogger(__name__)
 
@@ -42,7 +43,9 @@ MAX_LLM_PER_RUN = 8
 class SourceSpec:
     key: str
     label: str
-    fetch: Callable[[httpx.Client], list[RawPost]]
+    # (client, since) -> posts; `since` is the last successful pass, so a
+    # source can page back after Klados was off for a while
+    fetch: Callable[[httpx.Client, datetime | None], list[RawPost]]
     interval_s: Callable[[], int]
     is_configured: Callable[[], bool]
     setup_hint: str
@@ -95,6 +98,14 @@ def take_poll_request(r: Redis, source: str) -> bool:
     return bool(r.delete(_poll_now_key(source)))
 
 
+def last_ok_at(r: Redis, source: str) -> datetime | None:
+    val = r.hget(_status_key(source), "last_ok_at")
+    try:
+        return datetime.fromisoformat(val.decode() if isinstance(val, bytes) else val)
+    except (TypeError, ValueError, AttributeError):
+        return None
+
+
 def last_attempt_ts(r: Redis, source: str) -> float:
     val = r.hget(_status_key(source), "last_attempt_at")
     try:
@@ -120,6 +131,16 @@ def _record(r: Redis, source: str, **fields) -> None:
 
 
 def _insert(db, raw: RawPost, assessment) -> IntentPost | None:
+    bid = None
+    if raw.source == "freelancer":
+        bid = suggest_bid(
+            budget_min=raw.budget_min,
+            budget_max=raw.budget_max,
+            currency=raw.currency,
+            hourly=raw.hints.get("project_type") == "hourly",
+            fit=assessment.fit,
+            budget_usd=assessment.budget_usd,
+        )
     values = {
         "source": raw.source,
         "external_id": raw.external_id[:255],
@@ -138,7 +159,7 @@ def _insert(db, raw: RawPost, assessment) -> IntentPost | None:
         "score": assessment.score,
         "signals": assessment.signals,
         "is_local": assessment.is_local,
-        "reply_draft": template_reply(assessment.fit, raw.title, raw.author),
+        "reply_draft": draft_reply(raw.source, assessment.fit, raw.title, raw.author, bid),
         "status": "NEW",
     }
     stmt = (
@@ -174,7 +195,7 @@ def enrich_and_alert(db, rows: list[IntentPost]) -> None:
         (p for p in rows if p.score >= settings.INTENT_LLM_MIN_SCORE), key=lambda p: -p.score
     )[:MAX_LLM_PER_RUN]
     for post in worth:
-        extra = ollama_enrich(post.title, post.body)
+        extra = ollama_enrich(post.title, post.body, post.source, bid_for_post(post))
         if extra is None:
             break  # Ollama is down; don't wait out the timeout for every post
         post.summary = extra["summary"] or post.summary
@@ -193,6 +214,7 @@ def poll_source(name: str, r: Redis, session_factory=SessionLocal) -> dict:
     spec = SOURCES[name]
     started = time.monotonic()
     now = datetime.now(timezone.utc)
+    since = last_ok_at(r, name)
     _record(r, name, last_attempt_at=now.isoformat())
 
     if r.exists(_backoff_key(name)):
@@ -203,7 +225,7 @@ def poll_source(name: str, r: Redis, session_factory=SessionLocal) -> dict:
 
     try:
         with make_client() as client:
-            posts = spec.fetch(client)
+            posts = spec.fetch(client, since)
     except SourceRateLimited as exc:
         r.set(_backoff_key(name), "1", ex=exc.retry_after)
         _record(r, name, last_error=str(exc), state="backing_off")

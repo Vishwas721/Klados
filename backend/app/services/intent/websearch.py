@@ -49,7 +49,7 @@ def is_configured() -> bool:
     return bool(settings.SEARXNG_URL)
 
 
-def fetch(client: httpx.Client) -> list[RawPost]:
+def fetch(client: httpx.Client, since=None) -> list[RawPost]:
     if not is_configured():
         raise SourceNotConfigured("Set SEARXNG_URL (docker compose runs one on :8888)")
     base = settings.SEARXNG_URL.rstrip("/")

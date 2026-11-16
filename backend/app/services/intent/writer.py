@@ -9,6 +9,7 @@ import json
 import httpx
 
 from app.core.config import settings
+from app.services.intent.bidding import Bid, price_line, proposal_text
 
 _TEMPLATES = {
     "WEBSITE_BUILD": (
@@ -48,14 +49,36 @@ Post text:
 """
 
 
-def _topic(title: str) -> str:
+def _topic(title: str, lower: bool = True) -> str:
     topic = title.strip().rstrip(".!?")
     for tag in ("[Hiring]", "[HIRING]", "[hiring]", "[Task]", "[TASK]", "[task]"):
         topic = topic.replace(tag, "")
     topic = topic.strip(" -:|")
     if len(topic) > 70:
         topic = topic[:67].rsplit(" ", 1)[0] + "…"
-    return topic[:1].lower() + topic[1:] if topic else "your project"
+    if not topic:
+        return "your project"
+    return topic[:1].lower() + topic[1:] if lower else topic
+
+
+_BID_PROMPT = """You help a freelance web developer in India write a bid on a Freelancer.com project.
+Read the project and answer strictly with JSON, no commentary:
+
+{{"summary": string, "reply": string}}
+
+- summary: one plain sentence (max 25 words) saying what the client needs and any budget or deadline.
+- reply: the bid proposal (max 130 words). Open with one specific detail from their brief, then a
+  3-step plan as a numbered list, then this price line copied exactly:
+  {price_line}
+  then "Recent work: {portfolio}", then one short question about their project.
+  Plain and confident, no buzzwords, no emojis, no "Dear Sir".
+
+Project title: {title}
+Project text:
+\"\"\"
+{body}
+\"\"\"
+"""
 
 
 def template_reply(fit: str, title: str, author: str | None = None) -> str:
@@ -63,14 +86,30 @@ def template_reply(fit: str, title: str, author: str | None = None) -> str:
     return _TEMPLATES.get(fit, _TEMPLATES["OTHER"]).format(name=name, topic=_topic(title))
 
 
-def ollama_enrich(title: str, body: str) -> dict | None:
+def draft_reply(source: str, fit: str, title: str, author: str | None, bid: Bid | None) -> str:
+    """A bid proposal for marketplace projects, a short first message elsewhere."""
+    if source == "freelancer":
+        return proposal_text(fit, _topic(title, lower=False), bid)
+    return template_reply(fit, title, author)
+
+
+def ollama_enrich(title: str, body: str, source: str = "", bid: Bid | None = None) -> dict | None:
     """{"summary", "reply"} from the local model, or None when it's unavailable."""
+    if source == "freelancer":
+        prompt = _BID_PROMPT.format(
+            price_line=price_line(bid),
+            portfolio=settings.PORTFOLIO_URL or "[add your portfolio link]",
+            title=title,
+            body=body[:2500],
+        )
+    else:
+        prompt = _PROMPT.format(title=title, body=body[:2500])
     try:
         res = httpx.post(
             settings.OLLAMA_URL,
             json={
                 "model": settings.OLLAMA_MODEL,
-                "prompt": _PROMPT.format(title=title, body=body[:2500]),
+                "prompt": prompt,
                 "format": "json",
                 "stream": False,
             },

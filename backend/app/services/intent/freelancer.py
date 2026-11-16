@@ -1,5 +1,8 @@
 """Freelancer.com: active projects via the public projects API (no login)."""
 
+from datetime import datetime, timedelta
+import time
+
 import httpx
 
 from app.core.config import settings
@@ -8,6 +11,8 @@ from app.services.intent.base import RawPost, from_unix, raise_for_rate_limit
 SOURCE = "freelancer"
 API_URL = "https://www.freelancer.com/api/projects/0.1/projects/active/"
 PROJECT_URL = "https://www.freelancer.com/projects/"
+PAGE_SIZE = 50
+PAGE_GAP_S = 1.0
 
 
 def parse_projects(payload: dict) -> list[RawPost]:
@@ -39,19 +44,36 @@ def parse_projects(payload: dict) -> list[RawPost]:
     return posts
 
 
-def fetch(client: httpx.Client) -> list[RawPost]:
+def fetch(client: httpx.Client, since: datetime | None = None) -> list[RawPost]:
+    """Newest projects per query, paging back to `since` when Klados was off.
+
+    Without `since` (first run) a single page per query is read. With it,
+    pages continue until they reach projects older than `since`, capped at
+    FREELANCER_MAX_PAGES, so a day away is caught up in one pass.
+    """
+    # A little overlap so projects posted during the last pass aren't missed
+    cutoff = since - timedelta(minutes=15) if since else None
+    max_pages = settings.FREELANCER_MAX_PAGES if cutoff else 1
     seen: dict[str, RawPost] = {}
     for query in settings.FREELANCER_QUERIES:
-        res = client.get(
-            API_URL,
-            params={
-                "query": query,
-                "limit": 50,
-                "full_description": "true",
-                "job_details": "true",
-            },
-        )
-        raise_for_rate_limit(res, SOURCE)
-        for post in parse_projects(res.json()):
-            seen.setdefault(post.external_id, post)
+        for page in range(max_pages):
+            if page:
+                time.sleep(PAGE_GAP_S)
+            res = client.get(
+                API_URL,
+                params={
+                    "query": query,
+                    "limit": PAGE_SIZE,
+                    "offset": page * PAGE_SIZE,
+                    "full_description": "true",
+                    "job_details": "true",
+                },
+            )
+            raise_for_rate_limit(res, SOURCE)
+            batch = parse_projects(res.json())
+            for post in batch:
+                seen.setdefault(post.external_id, post)
+            dated = [p.posted_at for p in batch if p.posted_at]
+            if len(batch) < PAGE_SIZE or not cutoff or (dated and min(dated) < cutoff):
+                break
     return list(seen.values())

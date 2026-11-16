@@ -49,6 +49,7 @@ export function RequestReader({
 
   const fit = FIT_META[post.fit];
   const budget = budgetLabel(post);
+  const isBid = post.source === "freelancer";
   const longBody = post.body.length > BODY_PREVIEW;
   const body = expanded || !longBody ? post.body : `${post.body.slice(0, BODY_PREVIEW).trimEnd()}…`;
 
@@ -141,16 +142,32 @@ export function RequestReader({
         </section>
       )}
 
+      {/* Suggested bid (marketplace projects) */}
+      {post.bid && (
+        <section className="mt-6 flex flex-col gap-3 rounded-xl border border-signal/40 p-4 sm:flex-row sm:items-center sm:justify-between">
+          <div>
+            <h3 className="text-[10px] font-semibold uppercase tracking-[0.14em] text-faint">Suggested bid</h3>
+            <p className="mt-1 font-serif text-3xl leading-none tabular-nums">
+              {post.bid.label.split(" · ")[0]}
+              {post.bid.days && <span className="ml-2 text-lg text-muted">in {post.bid.days} days</span>}
+            </p>
+          </div>
+          <p className="max-w-xs text-xs leading-relaxed text-muted">{post.bid.rationale}</p>
+        </section>
+      )}
+
       {/* Reply */}
       <section className="mt-6 rounded-xl bg-sunk p-4">
         <div className="flex items-center justify-between">
-          <h3 className="text-[10px] font-semibold uppercase tracking-[0.14em] text-faint">Your first message</h3>
+          <h3 className="text-[10px] font-semibold uppercase tracking-[0.14em] text-faint">
+            {isBid ? "Your proposal" : "Your first message"}
+          </h3>
           <span className="text-[11px] text-faint">edit freely · C copies</span>
         </div>
         <textarea
           value={reply}
           onChange={(e) => onReplyChange(e.target.value)}
-          rows={5}
+          rows={isBid ? 12 : 5}
           className="mt-2 w-full resize-y bg-transparent text-[15px] leading-relaxed text-ink outline-none"
         />
         <div className="mt-3 flex flex-wrap gap-2">
@@ -159,7 +176,7 @@ export function RequestReader({
             onClick={onCopyAndOpen}
             className="inline-flex items-center gap-1.5 rounded-full bg-signal px-4 py-2 text-sm font-semibold text-signal-ink transition hover:brightness-110"
           >
-            Copy &amp; open post <ArrowUpRight className="h-4 w-4" />
+            {isBid ? "Copy proposal & open project" : "Copy & open post"} <ArrowUpRight className="h-4 w-4" />
           </button>
           <button
             type="button"
@@ -170,6 +187,12 @@ export function RequestReader({
             {copied ? "Copied" : "Copy"}
           </button>
         </div>
+        {isBid && (
+          <p className="mt-3 text-xs leading-relaxed text-muted">
+            On Freelancer.com: click <span className="text-ink">Bid on this project</span>, enter the price and days
+            above, paste this into the proposal box, then file it here as <span className="text-ink">Replied</span>.
+          </p>
+        )}
       </section>
 
       {/* File it */}

@@ -14,6 +14,12 @@ x-backend-env: &backend-env
   # Ollama runs on the host, not in the stack.
   OLLAMA_URL: http://host.docker.internal:11434/api/generate
   SEARXNG_URL: http://searxng:8080
+  # Personal settings come from the repo-root .env (git-ignored)
+  PORTFOLIO_URL: ${PORTFOLIO_URL:-}
+  TELEGRAM_BOT_TOKEN: ${TELEGRAM_BOT_TOKEN:-}
+  TELEGRAM_CHAT_ID: ${TELEGRAM_CHAT_ID:-}
+  REDDIT_CLIENT_ID: ${REDDIT_CLIENT_ID:-}
+  REDDIT_CLIENT_SECRET: ${REDDIT_CLIENT_SECRET:-}
 
 services:
   postgres:
@@ -92,21 +98,23 @@ services:
       redis:
         condition: service_healthy
 
-  # Request radar: polls freelance boards, Reddit, HN, feeds and SearXNG
+  # Request radar: polls freelance boards, Reddit, HN, feeds and SearXNG.
+  # Runnable on its own so it stays on whenever Docker Desktop is:
+  #   docker compose up -d --build intent
   intent:
     build:
       context: .
       dockerfile: Dockerfile.api
     container_name: klados_intent
     restart: unless-stopped
-    command: ["python", "-m", "app.intent_poller"]
+    command: ["sh", "-c", "alembic upgrade head && python -m app.intent_poller"]
     environment:
       <<: *backend-env
     extra_hosts:
       - "host.docker.internal:host-gateway"
     depends_on:
-      api:
-        condition: service_started
+      postgres:
+        condition: service_healthy
       redis:
         condition: service_healthy
       searxng:

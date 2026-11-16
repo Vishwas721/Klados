@@ -49,7 +49,7 @@ def parse_thread(payload: dict) -> list[RawPost]:
     return posts
 
 
-def fetch(client: httpx.Client) -> list[RawPost]:
+def fetch(client: httpx.Client, since=None) -> list[RawPost]:
     thread_id = latest_thread_id(client)
     if thread_id is None:
         return []
