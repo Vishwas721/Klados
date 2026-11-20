@@ -68,6 +68,8 @@ class Settings(BaseSettings):
     ]
     # Fetched as two feeds so busy discussion subs can't push the hiring
     # posts out of the 100-post window.
+    # Off by default: review-heavy marketplaces are hard to win from zero
+    FREELANCER_ENABLED: bool = False
     # When Klados was off for a while, page back through up to this many
     # pages of 50 per query to catch up (~10 h of "website" posts per page)
     FREELANCER_MAX_PAGES: int = 6

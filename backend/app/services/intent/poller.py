@@ -56,7 +56,7 @@ SOURCES: dict[str, SourceSpec] = {
     for s in [
         SourceSpec(
             "freelancer", "Freelancer.com", freelancer.fetch, lambda: settings.FREELANCER_POLL_S,
-            lambda: True, "Public projects API, no setup needed.",
+            lambda: settings.FREELANCER_ENABLED, "Switched off. Set FREELANCER_ENABLED=true in .env to turn it back on.",
         ),
         SourceSpec(
             "reddit", "Reddit", reddit.fetch, lambda: settings.REDDIT_POLL_S, lambda: True,
