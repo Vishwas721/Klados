@@ -70,6 +70,14 @@ class Lead(Base):
 
     opted_out: Mapped[bool] = mapped_column(Boolean, default=False)
 
+    # Call desk: the latest phone outcome and when the lead is due again.
+    # INTERESTED | CALL_BACK | NOT_INTERESTED | WRONG_NUMBER | NO_ANSWER
+    call_outcome: Mapped[str | None] = mapped_column(String(20), nullable=True, index=True)
+    call_attempts: Mapped[int] = mapped_column(Integer, default=0, server_default="0")
+    last_called_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    next_call_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    call_notes: Mapped[str | None] = mapped_column(Text, nullable=True)
+
     status: Mapped[str] = mapped_column(
         Enum(
             "PENDING",

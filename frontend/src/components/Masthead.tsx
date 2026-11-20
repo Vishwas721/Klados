@@ -2,14 +2,15 @@
 
 import { useEffect, useState } from "react";
 import { Command, Moon, Sun } from "lucide-react";
-import { IntentSource, IntentStats, LeadStats } from "@/lib/types";
+import { CallStats, IntentSource, IntentStats, LeadStats } from "@/lib/types";
 
-export type Lens = "requests" | "businesses" | "sources";
+export type Lens = "requests" | "businesses" | "calls" | "sources";
 
 export const LENSES: { key: Lens; verb: string; noun: string; hotkey: string }[] = [
   { key: "requests", verb: "Read the", noun: "requests", hotkey: "1" },
   { key: "businesses", verb: "Work the", noun: "businesses", hotkey: "2" },
-  { key: "sources", verb: "Tune the", noun: "sources", hotkey: "3" },
+  { key: "calls", verb: "Make the", noun: "calls", hotkey: "3" },
+  { key: "sources", verb: "Tune the", noun: "sources", hotkey: "4" },
 ];
 
 interface MastheadProps {
@@ -17,6 +18,7 @@ interface MastheadProps {
   onLens: (lens: Lens) => void;
   intentStats: IntentStats | null;
   leadStats: LeadStats | null;
+  callStats: CallStats | null;
   sources: IntentSource[];
   onOpenPalette: () => void;
 }
@@ -25,7 +27,27 @@ function Num({ children }: { children: React.ReactNode }) {
   return <span className="text-signal tabular-nums">{children}</span>;
 }
 
-function Headline({ lens, intentStats, leadStats, sources }: Omit<MastheadProps, "onLens" | "onOpenPalette">) {
+function Headline({ lens, intentStats, leadStats, callStats, sources }: Omit<MastheadProps, "onLens" | "onOpenPalette">) {
+  if (lens === "calls") {
+    if (!callStats) return <>The phone is ready.</>;
+    const yes = callStats.today_by_outcome.INTERESTED ?? 0;
+    if (callStats.called_today === 0) {
+      return (
+        <>
+          <Num>{callStats.queue}</Num> businesses to call.{" "}
+          <span className="italic text-muted">One yes in a hundred is a good day.</span>
+        </>
+      );
+    }
+    return (
+      <>
+        <Num>{callStats.called_today}</Num> calls today.{" "}
+        <span className="italic text-muted">
+          <Num>{yes}</Num> said yes{yes ? ". Follow up while it's warm." : ". Keep going."}
+        </span>
+      </>
+    );
+  }
   if (lens === "requests") {
     if (!intentStats || intentStats.total === 0) {
       return <>No requests yet. The radar is listening.</>;
@@ -112,13 +134,14 @@ function ThemeToggle() {
 }
 
 export function Masthead(props: MastheadProps) {
-  const { lens, onLens, intentStats, leadStats, sources, onOpenPalette } = props;
+  const { lens, onLens, intentStats, leadStats, callStats, sources, onOpenPalette } = props;
   const today = useToday();
   const live = sources.filter((s) => s.configured && s.state === "ok").length;
 
   const counts: Record<Lens, number | null> = {
     requests: intentStats?.by_status.NEW ?? null,
     businesses: leadStats?.total ?? null,
+    calls: callStats?.queue ?? null,
     sources: sources.length ? live : null,
   };
 
@@ -151,7 +174,7 @@ export function Masthead(props: MastheadProps) {
 
       {/* Headline */}
       <h1 className="mt-6 max-w-4xl font-serif text-[2.1rem] leading-[1.08] tracking-tight sm:mt-8 sm:text-5xl lg:text-6xl">
-        <Headline lens={lens} intentStats={intentStats} leadStats={leadStats} sources={sources} />
+        <Headline lens={lens} intentStats={intentStats} leadStats={leadStats} callStats={callStats} sources={sources} />
       </h1>
 
       {/* Lens switch: a sentence, not a navbar */}

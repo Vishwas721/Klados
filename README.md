@@ -43,6 +43,25 @@ Dashboard (Next.js :3000) ──► API (FastAPI :8000) ──► Redis queue �
 Guardrails: at most 40 new leads per day (`DAILY_LIMIT`), 20 per cell, and a
 3–7 s random pause between audits.
 
+## Call desk
+
+*Make the calls* turns the audited businesses into a phone queue for you to
+work through by hand:
+
+- **Queue order:** callbacks that are due, then never-called businesses by
+  need (no website first). "No answer" comes back the next day, up to 3 tries;
+  "Not interested" and "Wrong number" never return.
+- **Script:** for each business, in Kannada script, Kannada in English letters,
+  or English. It says the shop's name the way you'd say it and mentions what
+  the audit found (no site, "Not secure", slow, no booking). It asks one
+  question and promises not to call again on a no.
+- **Outcomes:** one key each (Y / B / A / N / W). A "yes" moves to *Said yes*
+  with a one-tap WhatsApp follow-up in Kannada and a "Became a client" button.
+
+Calls are placed by you from your own phone, one at a time. The desk doesn't
+dial automatically: automated promotional calls are restricted in India
+(TRAI's commercial-communication rules).
+
 ## Request radar
 
 Besides Maps, a second process (`python -m app.intent_poller`) watches places

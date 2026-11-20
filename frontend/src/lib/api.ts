@@ -1,4 +1,6 @@
 import {
+  CallOutcome,
+  CallStats,
   ExhaustedCampaign,
   IntentFit,
   IntentPost,
@@ -144,4 +146,30 @@ export async function fetchIntentSources(): Promise<IntentSource[]> {
 export async function pollIntentSource(source: IntentSourceKey): Promise<void> {
   const res = await apiFetch(`/api/intent/sources/${source}/poll`, { method: "POST" });
   await ensureOk(res, "Failed to queue poll");
+}
+
+// ── Call desk ────────────────────────────────────────────────────────────────
+export async function fetchCallQueue(limit = 40): Promise<Lead[]> {
+  return getJson(`/api/calls/queue?limit=${limit}`, "Failed to load the call queue");
+}
+
+export async function fetchInterested(): Promise<Lead[]> {
+  return getJson("/api/calls/interested", "Failed to load interested leads");
+}
+
+export async function fetchCallStats(): Promise<CallStats> {
+  return getJson("/api/calls/stats", "Failed to load call stats");
+}
+
+export async function logCall(
+  id: string,
+  outcome: CallOutcome,
+  opts: { notes?: string; callbackAt?: string } = {}
+): Promise<Lead> {
+  const res = await apiFetch(`/api/leads/${id}/call`, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ outcome, notes: opts.notes, callback_at: opts.callbackAt }),
+  });
+  return (await ensureOk(res, "Failed to log the call")).json();
 }

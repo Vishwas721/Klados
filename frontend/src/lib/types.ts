@@ -36,6 +36,20 @@ export interface Lead {
   origin_source_url: string;
   opted_out: boolean;
   status: OutreachStatus;
+  call_outcome: CallOutcome | null;
+  call_attempts: number;
+  last_called_at: string | null;
+  next_call_at: string | null;
+  call_notes: string | null;
+}
+
+export type CallOutcome = "INTERESTED" | "CALL_BACK" | "NOT_INTERESTED" | "WRONG_NUMBER" | "NO_ANSWER";
+
+export interface CallStats {
+  queue: number;
+  called_today: number;
+  today_by_outcome: Partial<Record<CallOutcome, number>>;
+  interested_total: number;
 }
 
 export interface SearchHistoryItem {

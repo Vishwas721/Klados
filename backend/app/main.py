@@ -144,6 +144,11 @@ class LeadOut(BaseModel):
     origin_source_url: str
     opted_out: bool
     status: str
+    call_outcome: str | None = None
+    call_attempts: int = 0
+    last_called_at: datetime | None = None
+    next_call_at: datetime | None = None
+    call_notes: str | None = None
 
 
 @app.get("/health")
@@ -319,6 +324,123 @@ def update_lead_status(
         raise HTTPException(status_code=404, detail="Lead not found")
 
     lead.status = payload.status
+    db.commit()
+    db.refresh(lead)
+    return lead
+
+
+# ── Call desk ────────────────────────────────────────────────────────────────
+
+CallOutcome = Literal["INTERESTED", "CALL_BACK", "NOT_INTERESTED", "WRONG_NUMBER", "NO_ANSWER"]
+
+# Outcomes after which a lead never comes back to the queue
+FINAL_OUTCOMES = ("INTERESTED", "NOT_INTERESTED", "WRONG_NUMBER")
+# Unanswered leads are retried the next day, up to this many tries in total
+MAX_NO_ANSWER_ATTEMPTS = 3
+CALL_BACK_DEFAULT = timedelta(days=2)
+NO_ANSWER_RETRY = timedelta(days=1)
+# Who to call first: no website, broken basics, slow, then healthy sites
+CALL_PRIORITY = ["DIGITAL_GHOST", "DIGITAL_DINOSAUR", "LAGGY_UX", "AUTOMATION_CANDIDATE"]
+
+
+class CallLogIn(BaseModel):
+    outcome: CallOutcome
+    notes: str | None = Field(default=None, max_length=2000)
+    # For CALL_BACK: when to ring again (defaults to two days)
+    callback_at: datetime | None = None
+
+
+class CallStatsOut(BaseModel):
+    queue: int
+    called_today: int
+    today_by_outcome: dict[str, int]
+    interested_total: int
+
+
+def _due_filter(now: datetime):
+    """Leads the call desk should offer now."""
+    from sqlalchemy import and_, or_
+
+    return and_(
+        Lead.opted_out.is_(False),
+        Lead.phone_number != "",
+        or_(Lead.call_outcome.is_(None), Lead.call_outcome.notin_(FINAL_OUTCOMES)),
+        or_(Lead.call_outcome != "NO_ANSWER", Lead.call_outcome.is_(None), Lead.call_attempts < MAX_NO_ANSWER_ATTEMPTS),
+        or_(Lead.next_call_at.is_(None), Lead.next_call_at <= now),
+    )
+
+
+@app.get("/api/calls/queue", response_model=list[LeadOut])
+def call_queue(limit: int = Query(default=40, le=200, gt=0), db: Session = Depends(get_db)):
+    """Who to ring next: callbacks that are due first, then never-called leads by need."""
+    from sqlalchemy import case
+
+    now = datetime.now(timezone.utc)
+    priority = case({c: i for i, c in enumerate(CALL_PRIORITY)}, value=Lead.category, else_=len(CALL_PRIORITY))
+    stmt = (
+        select(Lead)
+        .where(_due_filter(now))
+        .order_by(
+            (Lead.call_outcome == "CALL_BACK").desc().nulls_last(),
+            Lead.call_attempts.asc(),
+            priority,
+            Lead.created_at.desc(),
+        )
+        .limit(limit)
+    )
+    return db.execute(stmt).scalars().all()
+
+
+@app.get("/api/calls/interested", response_model=list[LeadOut])
+def call_interested(db: Session = Depends(get_db)):
+    stmt = select(Lead).where(Lead.call_outcome == "INTERESTED").order_by(Lead.last_called_at.desc())
+    return db.execute(stmt).scalars().all()
+
+
+@app.get("/api/calls/stats", response_model=CallStatsOut)
+def call_stats(db: Session = Depends(get_db)):
+    now = datetime.now(timezone.utc)
+    # "Today" in India, where the calls happen
+    ist_midnight = (now + timedelta(hours=5, minutes=30)).replace(hour=0, minute=0, second=0, microsecond=0) - timedelta(
+        hours=5, minutes=30
+    )
+    queue = db.execute(select(func.count()).select_from(Lead).where(_due_filter(now))).scalar_one()
+    rows = db.execute(
+        select(Lead.call_outcome, func.count())
+        .where(Lead.last_called_at >= ist_midnight)
+        .group_by(Lead.call_outcome)
+    ).all()
+    interested = db.execute(
+        select(func.count()).select_from(Lead).where(Lead.call_outcome == "INTERESTED")
+    ).scalar_one()
+    today = {o: c for o, c in rows if o}
+    return CallStatsOut(
+        queue=queue, called_today=sum(today.values()), today_by_outcome=today, interested_total=interested
+    )
+
+
+@app.post("/api/leads/{lead_id}/call", response_model=LeadOut)
+def log_call(lead_id: uuid.UUID, payload: CallLogIn, db: Session = Depends(get_db)):
+    lead = db.get(Lead, lead_id)
+    if lead is None:
+        raise HTTPException(status_code=404, detail="Lead not found")
+
+    now = datetime.now(timezone.utc)
+    lead.call_outcome = payload.outcome
+    lead.call_attempts = (lead.call_attempts or 0) + 1
+    lead.last_called_at = now
+    if payload.notes is not None:
+        lead.call_notes = payload.notes.strip() or None
+
+    if payload.outcome == "CALL_BACK":
+        lead.next_call_at = payload.callback_at or now + CALL_BACK_DEFAULT
+    elif payload.outcome == "NO_ANSWER":
+        lead.next_call_at = now + NO_ANSWER_RETRY
+    else:
+        lead.next_call_at = None
+
+    if payload.outcome == "INTERESTED":
+        lead.status = "RESPONDED"
     db.commit()
     db.refresh(lead)
     return lead

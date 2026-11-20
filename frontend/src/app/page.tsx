@@ -1,8 +1,8 @@
 "use client";
 
 import { useCallback, useEffect, useMemo, useState } from "react";
-import { IntentFit, IntentSource, IntentSourceKey, IntentStats, IntentStatus, LeadStats } from "@/lib/types";
-import { fetchIntentSources, fetchIntentStats, fetchLeadStats, pollIntentSource } from "@/lib/api";
+import { CallStats, IntentFit, IntentSource, IntentSourceKey, IntentStats, IntentStatus, LeadStats } from "@/lib/types";
+import { fetchCallStats, fetchIntentSources, fetchIntentStats, fetchLeadStats, pollIntentSource } from "@/lib/api";
 import { FIT_META, FIT_ORDER, STATUS_META, STATUS_ORDER } from "@/lib/intent";
 import { useToast } from "@/lib/useToast";
 import { LENSES, Lens, Masthead } from "@/components/Masthead";
@@ -10,6 +10,7 @@ import { CommandPalette, PaletteCommand } from "@/components/CommandPalette";
 import { RequestsDesk } from "@/components/requests/RequestsDesk";
 import { BusinessesDesk } from "@/components/businesses/BusinessesDesk";
 import { SourcesDesk } from "@/components/sources/SourcesDesk";
+import { CallDesk } from "@/components/calls/CallDesk";
 import { ToastContainer } from "@/components/ToastContainer";
 
 const REFRESH_MS = 60_000;
@@ -28,6 +29,7 @@ export default function DeskPage() {
   const [lens, setLensState] = useState<Lens>("requests");
   const [intentStats, setIntentStats] = useState<IntentStats | null>(null);
   const [leadStats, setLeadStats] = useState<LeadStats | null>(null);
+  const [callStats, setCallStats] = useState<CallStats | null>(null);
   const [sources, setSources] = useState<IntentSource[]>([]);
   const [paletteOpen, setPaletteOpen] = useState(false);
   const [refreshKey, setRefreshKey] = useState(0);
@@ -49,7 +51,13 @@ export default function DeskPage() {
   }, []);
 
   const loadStats = useCallback(async () => {
-    const [i, l, s] = await Promise.allSettled([fetchIntentStats(), fetchLeadStats(), fetchIntentSources()]);
+    const [i, l, s, c] = await Promise.allSettled([
+      fetchIntentStats(),
+      fetchLeadStats(),
+      fetchIntentSources(),
+      fetchCallStats(),
+    ]);
+    if (c.status === "fulfilled") setCallStats(c.value);
     if (i.status === "fulfilled") setIntentStats(i.value);
     if (l.status === "fulfilled") setLeadStats(l.value);
     if (s.status === "fulfilled") setSources(s.value);
@@ -142,6 +150,7 @@ export default function DeskPage() {
         onLens={setLens}
         intentStats={intentStats}
         leadStats={leadStats}
+        callStats={callStats}
         sources={sources}
         onOpenPalette={() => setPaletteOpen(true)}
       />
@@ -161,6 +170,7 @@ export default function DeskPage() {
       {lens === "businesses" && (
         <BusinessesDesk stats={leadStats} refreshKey={refreshKey} onChanged={loadStats} toast={toast} />
       )}
+      {lens === "calls" && <CallDesk stats={callStats} refreshKey={refreshKey} onChanged={loadStats} toast={toast} />}
       {lens === "sources" && <SourcesDesk sources={sources} stats={intentStats} onPoll={pollSource} />}
 
       <CommandPalette open={paletteOpen} onClose={() => setPaletteOpen(false)} commands={commands} />
